@@ -80,9 +80,10 @@
   /* Forms */
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-  .field input, .field select {
+  .field input, .field select, .field textarea {
     width: 100%; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text); padding: 9px 12px; font-size: 14px;
+    font-family: inherit;
   }
   .row { display: flex; gap: 12px; }
   .row .field { flex: 1; }
@@ -96,7 +97,7 @@
   }
   .small-btn {
     background: transparent; border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; margin-right: 6px;
   }
   .error { color: var(--danger); font-size: 13px; margin-top: 8px; }
   .dropzone {
@@ -104,6 +105,20 @@
     text-align: center; color: var(--muted); cursor: pointer;
   }
   .dropzone.drag { border-color: var(--accent); color: var(--text); }
+
+  .inline-panel {
+    display: none;
+    margin-top: 16px;
+    padding: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .inline-panel.open { display: block; }
+  .inline-panel .title { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+  .inline-panel .title b { color: var(--text); }
+
+  iframe.embed { flex: 1; width: 100%; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
 </style>
 </head>
 <body>
@@ -114,6 +129,7 @@
   <button data-tab="upload">Upload Logs</button>
   <button data-tab="live">Live Logs</button>
   <button data-tab="freshdesk">Freshdesk Bugs</button>
+  <button data-tab="domo">Domo</button>
 </nav>
 
 <main>
@@ -143,6 +159,26 @@
       <thead><tr><th>File</th><th>Size</th><th></th></tr></thead>
       <tbody id="logs-table"></tbody>
     </table>
+
+    <div class="inline-panel" id="inspect-panel">
+      <div class="title">Inspecting <b id="inspect-filename"></b></div>
+      <div class="field">
+        <label>What do you want to check?</label>
+        <textarea id="inspect-question" rows="2" placeholder="e.g. Are there any repeated connection timeouts? What's causing the 502s?"></textarea>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Start line (optional)</label>
+          <input id="inspect-start" type="number" min="0" placeholder="0" />
+        </div>
+        <div class="field">
+          <label>Line count (optional)</label>
+          <input id="inspect-count" type="number" min="1" placeholder="e.g. 200" />
+        </div>
+      </div>
+      <button class="primary" id="inspect-ask">Ask Aura</button>
+      <button class="small-btn" id="inspect-cancel">Cancel</button>
+    </div>
   </section>
 
   <!-- LIVE LOGS -->
@@ -193,6 +229,50 @@
       <thead><tr><th>#</th><th>Subject</th><th>Status</th><th></th></tr></thead>
       <tbody id="fd-table"></tbody>
     </table>
+
+    <div class="inline-panel" id="fd-filter-panel">
+      <div class="title">Correlating ticket <b id="fd-filter-title"></b> &mdash; filters below are guessed from the ticket, edit as needed</div>
+      <div class="field">
+        <label>Service / keyword filter</label>
+        <input id="fd-filter-keyword" placeholder="e.g. checkout-service" />
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Start time (UTC)</label>
+          <input id="fd-filter-start" type="datetime-local" />
+        </div>
+        <div class="field">
+          <label>End time (UTC)</label>
+          <input id="fd-filter-end" type="datetime-local" />
+        </div>
+        <div class="field">
+          <label>Level</label>
+          <select id="fd-filter-level">
+            <option value="any">any level</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARN">WARN</option>
+            <option value="INFO">INFO</option>
+          </select>
+        </div>
+      </div>
+      <button class="primary" id="fd-filter-run">Run correlation</button>
+      <button class="small-btn" id="fd-filter-cancel">Cancel</button>
+    </div>
+  </section>
+
+  <!-- DOMO -->
+  <section class="panel" id="panel-domo">
+    <h2>Domo Dashboard</h2>
+    <div class="hint">Display-only embed &mdash; nothing here flows through Aura. Paste an embed URL from a Domo Card/Page's Share &gt; Embed option, or set <code>DOMO_EMBED_URL</code> in <code>.env</code>.</div>
+    <div class="row">
+      <div class="field" style="flex:3;">
+        <input id="domo-url" placeholder="https://public.domo.com/embed/..." />
+      </div>
+      <div class="field" style="flex:1; display:flex; align-items:flex-start;">
+        <button class="primary" id="domo-load" style="width:100%;">Load</button>
+      </div>
+    </div>
+    <iframe class="embed" id="domo-frame" style="display:none;"></iframe>
   </section>
 
 </main>
@@ -286,6 +366,11 @@ const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('file-input');
 const uploadStatus = document.getElementById('upload-status');
 const logsTable = document.getElementById('logs-table');
+const inspectPanel = document.getElementById('inspect-panel');
+const inspectFilename = document.getElementById('inspect-filename');
+const inspectQuestion = document.getElementById('inspect-question');
+const inspectStart = document.getElementById('inspect-start');
+const inspectCount = document.getElementById('inspect-count');
 
 dropzone.addEventListener('click', () => fileInput.click());
 ['dragover', 'dragleave', 'drop'].forEach(evt =>
@@ -311,9 +396,47 @@ async function uploadFile(file) {
   loadLogs();
 }
 
-function askAboutFile(name) {
+function quickScan(name) {
   sendChat('Analyze the uploaded log file "' + name + '" for errors and anomalies. Quote the relevant lines and summarize root cause.');
 }
+
+function openInspect(name) {
+  inspectPanel.dataset.filename = name;
+  inspectFilename.textContent = name;
+  inspectQuestion.value = '';
+  inspectStart.value = '';
+  inspectCount.value = '';
+  inspectPanel.classList.add('open');
+  inspectQuestion.focus();
+}
+
+document.getElementById('inspect-cancel').addEventListener('click', () => {
+  inspectPanel.classList.remove('open');
+});
+
+document.getElementById('inspect-ask').addEventListener('click', () => {
+  const name = inspectPanel.dataset.filename;
+  const question = inspectQuestion.value.trim();
+  if (!question) { inspectQuestion.focus(); return; }
+  const start = inspectStart.value;
+  const count = inspectCount.value;
+
+  let slicePhrase;
+  if (start || count) {
+    const s = start || '0';
+    const c = count || '200';
+    slicePhrase = 'Use the logs_read_log tool to read ' + c + ' lines starting at line ' + s +
+      ' of "' + name + '" (call logs_search_logs too if you need to look elsewhere in the file).';
+  } else {
+    slicePhrase = 'Use the logs_search_logs / logs_read_log tools to find the relevant part of "' + name + '".';
+  }
+
+  sendChat(
+    slicePhrase + ' Then answer: ' + question +
+    ' Quote the exact lines that support your answer.'
+  );
+  inspectPanel.classList.remove('open');
+});
 
 async function loadLogs() {
   const resp = await fetch('/api/logs');
@@ -324,8 +447,12 @@ async function loadLogs() {
     tr.innerHTML =
       '<td>' + f.name + '</td>' +
       '<td>' + f.size_bytes + ' B</td>' +
-      '<td><button class="small-btn">Ask Aura</button></td>';
-    tr.querySelector('button').addEventListener('click', () => askAboutFile(f.name));
+      '<td>' +
+        '<button class="small-btn" data-action="scan">Quick scan</button>' +
+        '<button class="small-btn" data-action="inspect">Inspect a slice...</button>' +
+      '</td>';
+    tr.querySelector('[data-action="scan"]').addEventListener('click', () => quickScan(f.name));
+    tr.querySelector('[data-action="inspect"]').addEventListener('click', () => openInspect(f.name));
     logsTable.appendChild(tr);
   }
 }
@@ -346,12 +473,19 @@ document.getElementById('live-ask').addEventListener('click', () => {
 // ---------- Freshdesk ----------
 const fdTable = document.getElementById('fd-table');
 const fdError = document.getElementById('fd-error');
+const fdFilterPanel = document.getElementById('fd-filter-panel');
+const fdFilterTitle = document.getElementById('fd-filter-title');
+const fdFilterKeyword = document.getElementById('fd-filter-keyword');
+const fdFilterStart = document.getElementById('fd-filter-start');
+const fdFilterEnd = document.getElementById('fd-filter-end');
+const fdFilterLevel = document.getElementById('fd-filter-level');
 
 async function searchFreshdesk() {
   const q = document.getElementById('fd-query').value.trim();
   if (!q) return;
   fdError.textContent = '';
   fdTable.innerHTML = '';
+  fdFilterPanel.classList.remove('open');
   const resp = await fetch('/api/freshdesk/search?q=' + encodeURIComponent(q));
   const data = await resp.json();
   if (data.error) {
@@ -365,12 +499,7 @@ async function searchFreshdesk() {
       '<td>' + (t.subject || '') + '</td>' +
       '<td><span class="badge">' + (t.status ?? '') + '</span></td>' +
       '<td><button class="small-btn">Correlate with logs</button></td>';
-    tr.querySelector('button').addEventListener('click', () => {
-      sendChat(
-        'Search the logs for issues related to Freshdesk ticket #' + t.id + ': "' +
-        (t.subject || '') + '". Look for matching errors around the reported time and summarize likely root cause.'
-      );
-    });
+    tr.querySelector('button').addEventListener('click', () => openFreshdeskFilters(t.id));
     fdTable.appendChild(tr);
   }
 }
@@ -378,6 +507,104 @@ document.getElementById('fd-search').addEventListener('click', searchFreshdesk);
 document.getElementById('fd-query').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') searchFreshdesk();
 });
+
+function toLocalInputValue(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) +
+    'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+}
+
+async function openFreshdeskFilters(ticketId) {
+  fdFilterTitle.textContent = 'loading...';
+  fdFilterPanel.dataset.ticketId = ticketId;
+  fdFilterPanel.classList.add('open');
+
+  const resp = await fetch('/api/freshdesk/ticket/' + ticketId);
+  const t = await resp.json();
+  if (t.error) {
+    fdFilterTitle.textContent = 'Could not load ticket #' + ticketId;
+    fdFilterPanel.dataset.description = '';
+    fdFilterPanel.dataset.subject = '';
+    return;
+  }
+
+  fdFilterTitle.textContent = '#' + t.id + ' — ' + (t.subject || '');
+  fdFilterPanel.dataset.subject = t.subject || '';
+  fdFilterPanel.dataset.description = (t.description_text || '').slice(0, 400);
+
+  // Guess a keyword filter from the subject; the user can edit it.
+  fdFilterKeyword.value = t.subject || '';
+
+  // Prefill a window around when the ticket was created — editable.
+  const created = t.created_at ? new Date(t.created_at) : new Date();
+  const start = new Date(created.getTime() - 30 * 60 * 1000);
+  const end = new Date(created.getTime() + 30 * 60 * 1000);
+  fdFilterStart.value = toLocalInputValue(start);
+  fdFilterEnd.value = toLocalInputValue(end);
+  fdFilterLevel.value = 'any';
+}
+
+document.getElementById('fd-filter-cancel').addEventListener('click', () => {
+  fdFilterPanel.classList.remove('open');
+});
+
+document.getElementById('fd-filter-run').addEventListener('click', () => {
+  const ticketId = fdFilterPanel.dataset.ticketId;
+  const subject = fdFilterPanel.dataset.subject;
+  const description = fdFilterPanel.dataset.description;
+  const keyword = fdFilterKeyword.value.trim();
+  const start = fdFilterStart.value;
+  const end = fdFilterEnd.value;
+  const level = fdFilterLevel.value;
+  const levelPhrase = level === 'any' ? 'any level' : level + '-level';
+
+  let prompt = 'Investigate Freshdesk ticket #' + ticketId + ': "' + subject + '".';
+  if (description) prompt += ' Ticket description: "' + description + '".';
+  prompt += ' Search both uploaded logs and live Mezmo logs, filtered to ' + levelPhrase +
+    ' entries';
+  if (keyword) prompt += ' matching "' + keyword + '"';
+  if (start && end) prompt += ', between ' + start + ' and ' + end + ' (UTC)';
+  prompt += '. Quote the exact matching log lines and summarize the likely root cause, ' +
+    'citing the ticket number.';
+
+  sendChat(prompt);
+  fdFilterPanel.classList.remove('open');
+});
+
+// ---------- Domo ----------
+const domoUrlInput = document.getElementById('domo-url');
+const domoFrame = document.getElementById('domo-frame');
+
+function loadDomo(url) {
+  if (!url) return;
+  domoFrame.src = url;
+  domoFrame.style.display = 'block';
+  localStorage.setItem('domoEmbedUrl', url);
+}
+
+document.getElementById('domo-load').addEventListener('click', () => {
+  loadDomo(domoUrlInput.value.trim());
+});
+domoUrlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') loadDomo(domoUrlInput.value.trim());
+});
+
+(async function initDomo() {
+  const saved = localStorage.getItem('domoEmbedUrl');
+  if (saved) {
+    domoUrlInput.value = saved;
+    loadDomo(saved);
+    return;
+  }
+  try {
+    const resp = await fetch('/api/config');
+    const cfg = await resp.json();
+    if (cfg.domo_embed_url) {
+      domoUrlInput.value = cfg.domo_embed_url;
+      loadDomo(cfg.domo_embed_url);
+    }
+  } catch (e) { /* config endpoint optional */ }
+})();
 </script>
 </body>
 </html>

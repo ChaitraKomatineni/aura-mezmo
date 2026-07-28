@@ -26,16 +26,24 @@ Open **http://localhost:3000** for the control panel.
 | `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | the agent to run at all | any provider Aura supports (anthropic, openai, bedrock, ...) |
 | `MEZMO_API_KEY` | the "Live Logs" tab | Mezmo's hosted MCP server; omit and that tab's queries will just report no access |
 | `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY` | the "Freshdesk Bugs" tab | domain is the subdomain, e.g. `acme` for `acme.freshdesk.com` |
+| `DOMO_EMBED_URL` | the "Domo" tab (optional) | a Domo Card/Page's Share > Embed URL; can also be pasted directly into the tab instead |
 
-Everything works without Mezmo/Freshdesk credentials except those two tabs — the chat and log-upload flow run standalone.
+Everything works without Mezmo/Freshdesk/Domo credentials except those tabs — the chat and log-upload flow run standalone.
 
-## How the three pieces map to the ask
+## How the pieces map to the ask
 
-**Upload logs + chat.** The "Upload Logs" tab drops a file into a shared volume; `logs-mcp` immediately exposes it to the agent as a searchable tool. Click "Ask Aura" next to any uploaded file to jump into a chat pre-loaded with an analysis prompt.
+**Upload logs + chat, with slice inspection.** The "Upload Logs" tab drops a file into a shared volume; `logs-mcp` immediately exposes it to the agent. Each file has two actions: "Quick scan" (canned full-file error/anomaly analysis) and "Inspect a slice..." — a small form where you type a specific question and, optionally, a line range (start + count). It asks Aura to read exactly that slice (via `logs_read_log`'s offset/limit) rather than the whole file, and answer only your question, quoting the matching lines.
 
 **Live logs.** The "Live Logs" tab builds a natural-language query ("search Mezmo for ERROR logs from checkout-service over the last hour...") and sends it to the agent, which resolves it against the real Mezmo MCP server (`https://mcp.mezmo.com/mcp`) using `MEZMO_API_KEY`.
 
-**Freshdesk correlation.** The "Freshdesk Bugs" tab searches tickets directly (for browsing) and offers a "Correlate with logs" button per ticket, which asks the agent to cross-reference that ticket's subject/timing against uploaded and/or live logs and summarize a root cause.
+**Freshdesk correlation, filtered from the ticket itself.** Search tickets in the "Freshdesk Bugs" tab, then click "Correlate with logs." Before asking Aura anything, the UI fetches the ticket's full details (description, `created_at`) and prefills an editable filter panel: a service/keyword guess (from the subject), a time window (±30 min around when the ticket was created), and a log-level filter. Adjust anything, then "Run correlation" — the prompt sent to Aura includes the ticket description plus those exact filters, and `config/aura.toml`'s system prompt instructs the agent to treat them as hard constraints rather than re-guessing its own.
+
+**Domo (display only).** The "Domo" tab is a plain iframe embed of a Domo Card/Page — paste a Share > Embed URL (or set `DOMO_EMBED_URL`) and it persists in the browser. No data flows between Aura and Domo; it's just a dashboard panel alongside the rest of the playground.
+
+## Where the prompts live, if you want to tune them further
+
+- Per-action prompt templates (what exact text gets sent to chat for each button) are in `web/public/index.html`'s `<script>` — search for `sendChat(` calls.
+- The agent's overall behavior (tool usage, citing sources, how strictly to honor filters) is `system_prompt` in `config/aura.toml`.
 
 ## Extending
 

@@ -48,6 +48,13 @@ uploaded and/or live logs for matching timestamps, error strings, or
 service names, and summarize root cause with supporting evidence
 (quote the specific log lines and cite the ticket number).
 
+If the request includes explicit filters — a time window, a service or
+keyword, a log level, a specific line range — treat those as hard
+constraints, not suggestions. Pass them straight into the tool calls
+(e.g. logs_read_log's offset/limit, logs_search_logs's pattern, or the
+equivalent bounds on the Mezmo query) rather than re-deriving your own
+filters, and say explicitly if nothing matched within the given bounds.
+
 Be concise. Always say which tool/source a fact came from.
 """
 turn_depth = 8

@@ -25,6 +25,7 @@ AURA_MODEL = os.environ.get("AURA_MODEL", "aura-mezmo")
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
 FRESHDESK_DOMAIN = os.environ.get("FRESHDESK_DOMAIN", "")
 FRESHDESK_API_KEY = os.environ.get("FRESHDESK_API_KEY", "")
+DOMO_EMBED_URL = os.environ.get("DOMO_EMBED_URL", "")
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -34,6 +35,12 @@ app = FastAPI(title="Aura Mezmo Playground")
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/config")
+def config():
+    """Client-side config the UI prefills itself with (no secrets)."""
+    return {"domo_embed_url": DOMO_EMBED_URL}
 
 
 @app.post("/api/upload")
@@ -81,6 +88,43 @@ def freshdesk_search(q: str = Query(...)):
 
     tickets = data.get("results", data if isinstance(data, list) else [])
     return {"tickets": tickets}
+
+
+@app.get("/api/freshdesk/ticket/{ticket_id}")
+def freshdesk_ticket(ticket_id: int):
+    """Full ticket detail (description, timestamps) used to prefill the
+    correlation filters — search results alone don't include the body."""
+    if not FRESHDESK_DOMAIN or not FRESHDESK_API_KEY:
+        return JSONResponse(
+            {
+                "error": "Freshdesk is not configured yet. Set FRESHDESK_DOMAIN "
+                "and FRESHDESK_API_KEY in .env, then restart."
+            }
+        )
+    try:
+        with httpx.Client(
+            base_url=f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2",
+            auth=(FRESHDESK_API_KEY, "X"),
+            timeout=15.0,
+        ) as client:
+            resp = client.get(f"/tickets/{ticket_id}")
+            resp.raise_for_status()
+            ticket = resp.json()
+    except httpx.HTTPStatusError as e:
+        return JSONResponse({"error": f"Freshdesk API error: {e.response.status_code}"})
+    except httpx.HTTPError as e:
+        return JSONResponse({"error": f"Could not reach Freshdesk: {e}"})
+
+    return {
+        "id": ticket.get("id"),
+        "subject": ticket.get("subject"),
+        "description_text": ticket.get("description_text"),
+        "status": ticket.get("status"),
+        "priority": ticket.get("priority"),
+        "tags": ticket.get("tags"),
+        "created_at": ticket.get("created_at"),
+        "updated_at": ticket.get("updated_at"),
+    }
 
 
 @app.post("/api/chat")
