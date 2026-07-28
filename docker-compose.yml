@@ -1,0 +1,106 @@
+services:
+  # ── Aura Agent Server ──────────────────────────────────────────────
+  aura:
+    image: mezmo/aura:latest
+    pull_policy: always
+    container_name: aura-mezmo-agent
+    command:
+      - ./aura-web-server
+      - --verbose
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      CONFIG_PATH: "/app/config/aura.toml"
+    volumes:
+      - ./config/aura.toml:/app/config/aura.toml:ro
+    depends_on:
+      logs-mcp:
+        condition: service_healthy
+      freshdesk-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - aura-mezmo
+
+  # ── Uploaded-log tool server ─────────────────────────────────────────
+  logs-mcp:
+    build: ./services/logs-mcp
+    container_name: aura-mezmo-logs-mcp
+    ports:
+      - "8091:8091"
+    volumes:
+      - logs-data:/data/uploads
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -sf http://localhost:8091/mcp -X POST
+          -H "Content-Type: application/json"
+          -H "Accept: application/json, text/event-stream"
+          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
+          > /dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - aura-mezmo
+
+  # ── Freshdesk tool server ────────────────────────────────────────────
+  freshdesk-mcp:
+    build: ./services/freshdesk-mcp
+    container_name: aura-mezmo-freshdesk-mcp
+    ports:
+      - "8092:8092"
+    env_file: .env
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -sf http://localhost:8092/mcp -X POST
+          -H "Content-Type: application/json"
+          -H "Accept: application/json, text/event-stream"
+          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
+          > /dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - aura-mezmo
+
+  # ── Web control panel (upload + live logs + Freshdesk + chat UI) ────
+  web:
+    build: ./web
+    container_name: aura-mezmo-web
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      AURA_BASE_URL: "http://aura:8080"
+      UPLOAD_DIR: "/data/uploads"
+    volumes:
+      - logs-data:/data/uploads
+    depends_on:
+      aura:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - aura-mezmo
+
+networks:
+  aura-mezmo:
+
+volumes:
+  logs-data:

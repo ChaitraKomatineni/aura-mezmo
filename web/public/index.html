@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aura Mezmo Playground</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a21;
+    --border: #262b34;
+    --text: #e6e8eb;
+    --muted: #9aa3af;
+    --accent: #7c9cff;
+    --accent-dim: #2a3a63;
+    --danger: #ff8080;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    height: 100vh;
+  }
+  nav {
+    width: 220px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 20px 12px;
+    flex-shrink: 0;
+  }
+  nav h1 {
+    font-size: 15px;
+    margin: 0 8px 20px;
+    color: var(--text);
+  }
+  nav h1 span { color: var(--muted); font-weight: 400; }
+  nav button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 10px 12px;
+    margin-bottom: 4px;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 14px;
+    cursor: pointer;
+  }
+  nav button:hover { background: #1d222b; color: var(--text); }
+  nav button.active { background: var(--accent-dim); color: var(--text); }
+
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .panel { flex: 1; overflow-y: auto; padding: 24px; display: none; }
+  .panel.active { display: flex; flex-direction: column; }
+  .panel h2 { margin-top: 0; font-size: 18px; }
+  .hint { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+  /* Chat */
+  #chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.4; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #10131a; }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .chat-input-row { display: flex; gap: 8px; margin-top: 16px; }
+  .chat-input-row textarea {
+    flex: 1; resize: none; min-height: 44px; max-height: 140px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 10px 12px; font-family: inherit; font-size: 14px;
+  }
+
+  button.primary {
+    background: var(--accent); color: #10131a; border: none;
+    border-radius: 8px; padding: 10px 18px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  button.primary:disabled { opacity: 0.5; cursor: default; }
+
+  /* Forms */
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .field input, .field select {
+    width: 100%; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); padding: 9px 12px; font-size: 14px;
+  }
+  .row { display: flex; gap: 12px; }
+  .row .field { flex: 1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+    background: var(--accent-dim); color: var(--text);
+  }
+  .small-btn {
+    background: transparent; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .error { color: var(--danger); font-size: 13px; margin-top: 8px; }
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 30px;
+    text-align: center; color: var(--muted); cursor: pointer;
+  }
+  .dropzone.drag { border-color: var(--accent); color: var(--text); }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1>Aura <span>Mezmo Playground</span></h1>
+  <button data-tab="chat" class="active">Chat</button>
+  <button data-tab="upload">Upload Logs</button>
+  <button data-tab="live">Live Logs</button>
+  <button data-tab="freshdesk">Freshdesk Bugs</button>
+</nav>
+
+<main>
+
+  <!-- CHAT -->
+  <section class="panel active" id="panel-chat">
+    <h2>Chat with Aura</h2>
+    <div class="hint">Talks to the Aura agent, which can pull uploaded logs, live Mezmo logs, and Freshdesk tickets as tools.</div>
+    <div id="chat-log"></div>
+    <div class="chat-input-row">
+      <textarea id="chat-input" placeholder="Ask about a log, an error, or a bug ticket..."></textarea>
+      <button class="primary" id="chat-send">Send</button>
+    </div>
+  </section>
+
+  <!-- UPLOAD LOGS -->
+  <section class="panel" id="panel-upload">
+    <h2>Upload Logs</h2>
+    <div class="hint">Uploaded files become searchable to Aura via the <code>logs_*</code> tools.</div>
+    <div class="dropzone" id="dropzone">
+      Drop a log file here, or click to choose one
+      <input type="file" id="file-input" style="display:none" />
+    </div>
+    <div id="upload-status"></div>
+    <h3 style="margin-top:24px;">Uploaded files</h3>
+    <table>
+      <thead><tr><th>File</th><th>Size</th><th></th></tr></thead>
+      <tbody id="logs-table"></tbody>
+    </table>
+  </section>
+
+  <!-- LIVE LOGS -->
+  <section class="panel" id="panel-live">
+    <h2>Live Logs (Mezmo)</h2>
+    <div class="hint">Builds a prompt that asks Aura to query live logs through its Mezmo MCP tool. Requires <code>MEZMO_API_KEY</code> in <code>.env</code>.</div>
+    <div class="row">
+      <div class="field">
+        <label>App / service name</label>
+        <input id="live-app" placeholder="e.g. checkout-service" />
+      </div>
+      <div class="field">
+        <label>Level</label>
+        <select id="live-level">
+          <option value="ERROR">ERROR</option>
+          <option value="WARN">WARN</option>
+          <option value="INFO">INFO</option>
+          <option value="any">any level</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Time range</label>
+        <select id="live-range">
+          <option value="last 15 minutes">last 15 minutes</option>
+          <option value="last hour">last hour</option>
+          <option value="last 24 hours">last 24 hours</option>
+        </select>
+      </div>
+    </div>
+    <button class="primary" id="live-ask">Ask Aura</button>
+  </section>
+
+  <!-- FRESHDESK -->
+  <section class="panel" id="panel-freshdesk">
+    <h2>Freshdesk Bugs</h2>
+    <div class="hint">Direct ticket search for browsing. Requires <code>FRESHDESK_DOMAIN</code> and <code>FRESHDESK_API_KEY</code> in <code>.env</code>.</div>
+    <div class="row">
+      <div class="field" style="flex:3;">
+        <label>Search tickets</label>
+        <input id="fd-query" placeholder="e.g. checkout timeout" />
+      </div>
+      <div class="field" style="flex:1; display:flex; align-items:flex-end;">
+        <button class="primary" id="fd-search" style="width:100%;">Search</button>
+      </div>
+    </div>
+    <div id="fd-error" class="error"></div>
+    <table>
+      <thead><tr><th>#</th><th>Subject</th><th>Status</th><th></th></tr></thead>
+      <tbody id="fd-table"></tbody>
+    </table>
+  </section>
+
+</main>
+
+<script>
+const tabs = document.querySelectorAll('nav button[data-tab]');
+const panels = document.querySelectorAll('.panel');
+function showTab(name) {
+  tabs.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  panels.forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+}
+tabs.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+// ---------- Chat ----------
+const chatLog = document.getElementById('chat-log');
+const chatInput = document.getElementById('chat-input');
+const chatSend = document.getElementById('chat-send');
+let history = [];
+
+function addMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return div;
+}
+
+async function sendChat(message) {
+  showTab('chat');
+  addMessage('user', message);
+  history.push({ role: 'user', content: message });
+  chatInput.value = '';
+  chatSend.disabled = true;
+
+  const assistantDiv = addMessage('assistant', '...');
+  let assistantText = '';
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history }),
+    });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const json = JSON.parse(data);
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) {
+            assistantText += delta;
+            assistantDiv.textContent = assistantText;
+            chatLog.scrollTop = chatLog.scrollHeight;
+          }
+        } catch (e) { /* ignore non-JSON / custom aura.* events */ }
+      }
+    }
+  } catch (e) {
+    assistantDiv.textContent = 'Error talking to Aura: ' + e;
+  }
+
+  if (assistantText) history.push({ role: 'assistant', content: assistantText });
+  chatSend.disabled = false;
+}
+
+chatSend.addEventListener('click', () => {
+  const val = chatInput.value.trim();
+  if (val) sendChat(val);
+});
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    chatSend.click();
+  }
+});
+
+// ---------- Upload Logs ----------
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const uploadStatus = document.getElementById('upload-status');
+const logsTable = document.getElementById('logs-table');
+
+dropzone.addEventListener('click', () => fileInput.click());
+['dragover', 'dragleave', 'drop'].forEach(evt =>
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.toggle('drag', evt === 'dragover');
+  })
+);
+dropzone.addEventListener('drop', (e) => {
+  if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) uploadFile(fileInput.files[0]);
+});
+
+async function uploadFile(file) {
+  uploadStatus.textContent = 'Uploading ' + file.name + '...';
+  const form = new FormData();
+  form.append('file', file);
+  const resp = await fetch('/api/upload', { method: 'POST', body: form });
+  const data = await resp.json();
+  uploadStatus.textContent = 'Uploaded ' + data.name + ' (' + data.size_bytes + ' bytes)';
+  loadLogs();
+}
+
+function askAboutFile(name) {
+  sendChat('Analyze the uploaded log file "' + name + '" for errors and anomalies. Quote the relevant lines and summarize root cause.');
+}
+
+async function loadLogs() {
+  const resp = await fetch('/api/logs');
+  const data = await resp.json();
+  logsTable.innerHTML = '';
+  for (const f of data.files) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + f.name + '</td>' +
+      '<td>' + f.size_bytes + ' B</td>' +
+      '<td><button class="small-btn">Ask Aura</button></td>';
+    tr.querySelector('button').addEventListener('click', () => askAboutFile(f.name));
+    logsTable.appendChild(tr);
+  }
+}
+loadLogs();
+
+// ---------- Live Logs ----------
+document.getElementById('live-ask').addEventListener('click', () => {
+  const app = document.getElementById('live-app').value.trim() || 'all services';
+  const level = document.getElementById('live-level').value;
+  const range = document.getElementById('live-range').value;
+  const levelPhrase = level === 'any' ? 'all levels' : level + '-level';
+  sendChat(
+    'Search Mezmo for ' + levelPhrase + ' logs from ' + app + ' over the ' + range +
+    '. Summarize what you find, including any anomalies or spikes.'
+  );
+});
+
+// ---------- Freshdesk ----------
+const fdTable = document.getElementById('fd-table');
+const fdError = document.getElementById('fd-error');
+
+async function searchFreshdesk() {
+  const q = document.getElementById('fd-query').value.trim();
+  if (!q) return;
+  fdError.textContent = '';
+  fdTable.innerHTML = '';
+  const resp = await fetch('/api/freshdesk/search?q=' + encodeURIComponent(q));
+  const data = await resp.json();
+  if (data.error) {
+    fdError.textContent = data.error;
+    return;
+  }
+  for (const t of data.tickets || []) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>#' + t.id + '</td>' +
+      '<td>' + (t.subject || '') + '</td>' +
+      '<td><span class="badge">' + (t.status ?? '') + '</span></td>' +
+      '<td><button class="small-btn">Correlate with logs</button></td>';
+    tr.querySelector('button').addEventListener('click', () => {
+      sendChat(
+        'Search the logs for issues related to Freshdesk ticket #' + t.id + ': "' +
+        (t.subject || '') + '". Look for matching errors around the reported time and summarize likely root cause.'
+      );
+    });
+    fdTable.appendChild(tr);
+  }
+}
+document.getElementById('fd-search').addEventListener('click', searchFreshdesk);
+document.getElementById('fd-query').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') searchFreshdesk();
+});
+</script>
+</body>
+</html>

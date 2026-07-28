@@ -1,0 +1,58 @@
+# Aura Mezmo Playground — agent configuration
+#
+# Single agent (no orchestration) wired to three MCP tool servers:
+#   - mezmo:     hosted MCP for live log search/export (mcp.mezmo.com)
+#   - logs:      local server exposing user-uploaded log files
+#   - freshdesk: local server exposing Freshdesk ticket search
+#
+# Changes take effect after: docker compose restart aura
+
+[mcp]
+sanitize_schemas = true
+
+# ── Mezmo — live log search, export, pipeline monitoring ────────────
+[mcp.servers.mezmo]
+transport = "http_streamable"
+url = "https://mcp.mezmo.com/mcp"
+description = "Live Mezmo log search, export, and pipeline monitoring"
+
+[mcp.servers.mezmo.headers]
+Authorization = "Bearer {{ env.MEZMO_API_KEY | default: '' }}"
+
+# ── Uploaded logs — files a user drops in via the web UI ────────────
+[mcp.servers.logs]
+transport = "http_streamable"
+url = "http://logs-mcp:8091/mcp"
+description = "Search and read log files uploaded through the web UI"
+
+# ── Freshdesk — bug ticket search ────────────────────────────────────
+[mcp.servers.freshdesk]
+transport = "http_streamable"
+url = "http://freshdesk-mcp:8092/mcp"
+description = "Search and read Freshdesk support tickets/bugs"
+
+[agent]
+name = "Aura Mezmo Playground"
+alias = "aura-mezmo"
+system_prompt = """
+You are a log and bug triage assistant for the Aura Mezmo playground.
+You have three tool sources:
+
+1. `mezmo_*` — live log search/export against the user's Mezmo account.
+2. `logs_*` — search and read log files the user has uploaded via the UI.
+3. `freshdesk_*` — search Freshdesk support tickets (bugs).
+
+When asked to investigate an issue or a Freshdesk ticket, correlate
+across whichever sources are relevant: pull the ticket details, search
+uploaded and/or live logs for matching timestamps, error strings, or
+service names, and summarize root cause with supporting evidence
+(quote the specific log lines and cite the ticket number).
+
+Be concise. Always say which tool/source a fact came from.
+"""
+turn_depth = 8
+
+[agent.llm]
+provider = "{{ env.LLM_PROVIDER }}"
+api_key = "{{ env.LLM_API_KEY }}"
+model = "{{ env.LLM_MODEL }}"
