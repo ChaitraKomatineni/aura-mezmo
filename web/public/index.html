@@ -224,9 +224,26 @@
         <button class="primary" id="fd-search" style="width:100%;">Search</button>
       </div>
     </div>
+    <div class="row" style="align-items:flex-end;">
+      <div class="field" style="flex:0 0 220px;">
+        <label>Or show recent tickets from</label>
+        <select id="fd-recent-days">
+          <option value="1">last 1 day</option>
+          <option value="2" selected>last 2 days</option>
+          <option value="7">last 7 days</option>
+          <option value="30">last 30 days</option>
+        </select>
+      </div>
+      <div class="field" style="flex:0 0 auto;">
+        <button class="small-btn" id="fd-recent-load">Refresh</button>
+      </div>
+      <div class="field" style="flex:1;">
+        <span id="fd-list-caption" class="hint" style="margin:0;"></span>
+      </div>
+    </div>
     <div id="fd-error" class="error"></div>
     <table>
-      <thead><tr><th>#</th><th>Subject</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Subject</th><th>Status</th><th>Priority</th><th>Updated</th><th></th></tr></thead>
       <tbody id="fd-table"></tbody>
     </table>
 
@@ -473,40 +490,124 @@ document.getElementById('live-ask').addEventListener('click', () => {
 // ---------- Freshdesk ----------
 const fdTable = document.getElementById('fd-table');
 const fdError = document.getElementById('fd-error');
+const fdListCaption = document.getElementById('fd-list-caption');
 const fdFilterPanel = document.getElementById('fd-filter-panel');
 const fdFilterTitle = document.getElementById('fd-filter-title');
 const fdFilterKeyword = document.getElementById('fd-filter-keyword');
 const fdFilterStart = document.getElementById('fd-filter-start');
 const fdFilterEnd = document.getElementById('fd-filter-end');
 const fdFilterLevel = document.getElementById('fd-filter-level');
+const fdDetailCache = {};
+
+const FD_STATUS = { 2: 'Open', 3: 'Pending', 4: 'Resolved', 5: 'Closed' };
+const FD_PRIORITY = { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Urgent' };
+
+function formatTimestamp(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleString();
+}
+
+function renderTicketRows(tickets) {
+  fdTable.innerHTML = '';
+  for (const t of tickets) {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>#' + t.id + '</td>' +
+      '<td>' + (t.subject || '(no subject)') + '</td>' +
+      '<td><span class="badge">' + (FD_STATUS[t.status] || t.status || '') + '</span></td>' +
+      '<td><span class="badge">' + (FD_PRIORITY[t.priority] || t.priority || '') + '</span></td>' +
+      '<td>' + formatTimestamp(t.updated_at) + '</td>' +
+      '<td>' +
+        '<button class="small-btn" data-action="view">View</button>' +
+        '<button class="small-btn" data-action="correlate">Correlate with logs</button>' +
+      '</td>';
+    tr.querySelector('[data-action="view"]').addEventListener('click', () => toggleTicketDetail(t.id, tr));
+    tr.querySelector('[data-action="correlate"]').addEventListener('click', () => openFreshdeskFilters(t.id));
+    fdTable.appendChild(tr);
+  }
+}
+
+async function toggleTicketDetail(ticketId, afterRow) {
+  const existing = document.getElementById('fd-detail-' + ticketId);
+  if (existing) {
+    existing.remove();
+    return;
+  }
+  // Close any other open detail rows first.
+  document.querySelectorAll('[id^="fd-detail-"]').forEach(el => el.remove());
+
+  const detailTr = document.createElement('tr');
+  detailTr.id = 'fd-detail-' + ticketId;
+  const td = document.createElement('td');
+  td.colSpan = 6;
+  td.style.background = 'var(--bg)';
+  td.style.whiteSpace = 'pre-wrap';
+  td.textContent = 'Loading...';
+  detailTr.appendChild(td);
+  afterRow.after(detailTr);
+
+  let ticket = fdDetailCache[ticketId];
+  if (!ticket) {
+    const resp = await fetch('/api/freshdesk/ticket/' + ticketId);
+    ticket = await resp.json();
+    if (!ticket.error) fdDetailCache[ticketId] = ticket;
+  }
+
+  if (ticket.error) {
+    td.textContent = ticket.error;
+    return;
+  }
+  td.innerHTML =
+    '<b>#' + ticket.id + ' — ' + (ticket.subject || '') + '</b><br><br>' +
+    (ticket.description_text || '(no description)') + '<br><br>' +
+    '<span class="hint">Created ' + formatTimestamp(ticket.created_at) +
+    ' · Updated ' + formatTimestamp(ticket.updated_at) +
+    (ticket.tags && ticket.tags.length ? ' · Tags: ' + ticket.tags.join(', ') : '') +
+    '</span>';
+}
 
 async function searchFreshdesk() {
   const q = document.getElementById('fd-query').value.trim();
   if (!q) return;
   fdError.textContent = '';
-  fdTable.innerHTML = '';
   fdFilterPanel.classList.remove('open');
+  fdListCaption.textContent = 'Searching...';
   const resp = await fetch('/api/freshdesk/search?q=' + encodeURIComponent(q));
   const data = await resp.json();
   if (data.error) {
     fdError.textContent = data.error;
+    fdTable.innerHTML = '';
+    fdListCaption.textContent = '';
     return;
   }
-  for (const t of data.tickets || []) {
-    const tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td>#' + t.id + '</td>' +
-      '<td>' + (t.subject || '') + '</td>' +
-      '<td><span class="badge">' + (t.status ?? '') + '</span></td>' +
-      '<td><button class="small-btn">Correlate with logs</button></td>';
-    tr.querySelector('button').addEventListener('click', () => openFreshdeskFilters(t.id));
-    fdTable.appendChild(tr);
-  }
+  fdListCaption.textContent = (data.tickets || []).length + ' result(s) for "' + q + '"';
+  renderTicketRows(data.tickets || []);
 }
 document.getElementById('fd-search').addEventListener('click', searchFreshdesk);
 document.getElementById('fd-query').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') searchFreshdesk();
 });
+
+async function loadRecentFreshdesk() {
+  const days = document.getElementById('fd-recent-days').value;
+  fdError.textContent = '';
+  fdFilterPanel.classList.remove('open');
+  fdListCaption.textContent = 'Loading tickets from the last ' + days + ' day(s)...';
+  const resp = await fetch('/api/freshdesk/recent?days=' + days);
+  const data = await resp.json();
+  if (data.error) {
+    fdError.textContent = data.error;
+    fdTable.innerHTML = '';
+    fdListCaption.textContent = '';
+    return;
+  }
+  fdListCaption.textContent = data.count + ' ticket(s) from the last ' + days + ' day(s)';
+  renderTicketRows(data.tickets || []);
+}
+document.getElementById('fd-recent-load').addEventListener('click', loadRecentFreshdesk);
+document.getElementById('fd-recent-days').addEventListener('change', loadRecentFreshdesk);
+loadRecentFreshdesk();
 
 function toLocalInputValue(date) {
   const pad = (n) => String(n).padStart(2, '0');

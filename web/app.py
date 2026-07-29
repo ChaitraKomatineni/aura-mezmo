@@ -13,6 +13,7 @@ this app's Freshdesk/logs endpoints are for human browsing in the UI.
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -88,6 +89,54 @@ def freshdesk_search(q: str = Query(...)):
 
     tickets = data.get("results", data if isinstance(data, list) else [])
     return {"tickets": tickets}
+
+
+@app.get("/api/freshdesk/recent")
+def freshdesk_recent(days: int = Query(2, ge=1, le=30)):
+    """All tickets created or updated in the last `days` days, newest first."""
+    if not FRESHDESK_DOMAIN or not FRESHDESK_API_KEY:
+        return JSONResponse(
+            {
+                "error": "Freshdesk is not configured yet. Set FRESHDESK_DOMAIN "
+                "and FRESHDESK_API_KEY in .env, then restart."
+            }
+        )
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    tickets = []
+    try:
+        with httpx.Client(
+            base_url=f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2",
+            auth=(FRESHDESK_API_KEY, "X"),
+            timeout=15.0,
+        ) as client:
+            page = 1
+            while True:
+                resp = client.get(
+                    "/tickets",
+                    params={
+                        "updated_since": since,
+                        "order_by": "created_at",
+                        "order_type": "desc",
+                        "per_page": 100,
+                        "page": page,
+                    },
+                )
+                resp.raise_for_status()
+                batch = resp.json()
+                tickets.extend(batch)
+                # Freshdesk caps list pagination at 300 results (page 1-3 at
+                # 100/page); stop early if a page comes back short.
+                if len(batch) < 100 or page >= 3:
+                    break
+                page += 1
+    except httpx.HTTPStatusError as e:
+        return JSONResponse({"error": f"Freshdesk API error: {e.response.status_code}"})
+    except httpx.HTTPError as e:
+        return JSONResponse({"error": f"Could not reach Freshdesk: {e}"})
+
+    return {"since": since, "count": len(tickets), "tickets": tickets}
 
 
 @app.get("/api/freshdesk/ticket/{ticket_id}")
