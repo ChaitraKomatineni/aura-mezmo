@@ -5,11 +5,14 @@ Wraps the Freshdesk API v2 (https://developers.freshdesk.com/api/) so the
 Aura agent can search and read support tickets/bugs, and correlate them
 with log data from the other MCP servers.
 
-Requires FRESHDESK_DOMAIN (the subdomain, e.g. "acme" for
-acme.freshdesk.com) and FRESHDESK_API_KEY.
+Requires FRESHDESK_DOMAIN (either a bare subdomain, e.g. "acme" for
+acme.freshdesk.com, or a full custom portal domain such as
+"support.acme.com" if you've mapped one via Freshdesk's custom domain
+feature) and FRESHDESK_API_KEY.
 """
 
 import os
+import re
 
 import httpx
 from fastmcp import FastMCP
@@ -20,6 +23,13 @@ FRESHDESK_API_KEY = os.environ.get("FRESHDESK_API_KEY", "")
 mcp = FastMCP("freshdesk-mcp")
 
 
+def _base_url() -> str:
+    domain = re.sub(r"^https?://", "", FRESHDESK_DOMAIN.strip()).rstrip("/")
+    if "." in domain:
+        return f"https://{domain}/api/v2"
+    return f"https://{domain}.freshdesk.com/api/v2"
+
+
 def _client() -> httpx.Client:
     if not FRESHDESK_DOMAIN or not FRESHDESK_API_KEY:
         raise RuntimeError(
@@ -27,7 +37,7 @@ def _client() -> httpx.Client:
             "FRESHDESK_API_KEY in .env"
         )
     return httpx.Client(
-        base_url=f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2",
+        base_url=_base_url(),
         auth=(FRESHDESK_API_KEY, "X"),
         timeout=15.0,
     )

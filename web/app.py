@@ -13,6 +13,7 @@ this app's Freshdesk/logs endpoints are for human browsing in the UI.
 """
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +30,21 @@ FRESHDESK_API_KEY = os.environ.get("FRESHDESK_API_KEY", "")
 DOMO_EMBED_URL = os.environ.get("DOMO_EMBED_URL", "")
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def freshdesk_base_url() -> str:
+    """Build the Freshdesk API base URL from FRESHDESK_DOMAIN.
+
+    Accepts either a bare subdomain (e.g. "acme" -> acme.freshdesk.com) or
+    a full custom portal domain (e.g. "support.acme.com" or
+    "https://support.acme.com/") mapped via Freshdesk's custom domain
+    feature -- those already resolve on their own and must NOT get
+    ".freshdesk.com" appended.
+    """
+    domain = re.sub(r"^https?://", "", FRESHDESK_DOMAIN.strip()).rstrip("/")
+    if "." in domain:
+        return f"https://{domain}/api/v2"
+    return f"https://{domain}.freshdesk.com/api/v2"
 
 app = FastAPI(title="Aura Mezmo Playground")
 
@@ -74,7 +90,7 @@ def freshdesk_search(q: str = Query(...)):
         )
     try:
         with httpx.Client(
-            base_url=f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2",
+            base_url=freshdesk_base_url(),
             auth=(FRESHDESK_API_KEY, "X"),
             timeout=15.0,
         ) as client:
@@ -107,7 +123,7 @@ def freshdesk_recent(days: int = Query(2, ge=1, le=30)):
     tickets = []
     try:
         with httpx.Client(
-            base_url=f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2",
+            base_url=freshdesk_base_url(),
             auth=(FRESHDESK_API_KEY, "X"),
             timeout=15.0,
         ) as client:
@@ -152,7 +168,7 @@ def freshdesk_ticket(ticket_id: int):
         )
     try:
         with httpx.Client(
-            base_url=f"https://{FRESHDESK_DOMAIN}.freshdesk.com/api/v2",
+            base_url=freshdesk_base_url(),
             auth=(FRESHDESK_API_KEY, "X"),
             timeout=15.0,
         ) as client:
