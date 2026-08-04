@@ -52,15 +52,21 @@ session rather than treating the whole file as one shift:
    durable` also needs to catch `very_durable_pick`). Only quote a term if
    the row explicitly shows quotes.
 4. `host:` and `app:` prefixes shown in a row are filters to combine with the
-   keyword, not separate searches — e.g. `host:==gen1-prod17
+   keyword, not separate searches — e.g. `host:gen1-prod17
    mode.out_of_moves` means "search for `mode.out_of_moves` scoped to host
-   gen1-prod17".
-5. **If a search returns a very large result, don't try to hold it all in
+   gen1-prod17". See "Search syntax" below for exact filter syntax.
+5. **Don't assume an `app:` value from a container name.** The container
+   glossary below (`dill_app_taskloop`, `dill_app_camera`, etc.) is *not*
+   confirmed to map directly onto the `app` field's actual values — see the
+   open question in that section. Only use an `app:` value that's already
+   given explicitly in the keyword reference below; don't invent one from
+   the container list.
+6. **If a search returns a very large result, don't try to hold it all in
    context at once.** Use whatever exploration tools are available (grep,
    slice, head-style tools) to narrow it down, or issue a tighter follow-up
    search (add a time window or a more specific term) rather than reading
    the entire raw output.
-6. **If you run out of tool-call budget before finishing the full sweep**,
+7. **If you run out of tool-call budget before finishing the full sweep**,
    stop and write the note anyway with what you found, and say explicitly
    which categories you didn't get to check — never fail silently with no
    output at all. A partial, honestly-labeled note is more useful than none.
@@ -109,18 +115,97 @@ timeline entry rather than a separate section, unless the user only asked
 for config info. Omit the "Not checked" section entirely if nothing was
 skipped.
 
+## Search syntax (Mezmo query language)
+
+This is Mezmo's actual filter syntax — **it applies to the `mezmo_*` tools
+(live/hosted log search).** The `logs_*` tools (files uploaded through the
+web UI) are a simple substring-search server, not Mezmo — they do **not**
+understand any of the syntax below. If asked to filter an uploaded file by
+field or level, fall back to a plain substring search and say so, rather
+than passing Mezmo query syntax to `logs_search_logs` and assuming it did
+something smarter than a literal string match.
+
+**Text filters** — a bare word searches all fields: `searchword`. A phrase
+with spaces needs quotes: `"search for this pattern"`. Without quotes,
+`my message` means `"my" AND "message"` (two separate word matches, any
+order) — not the literal phrase "my message".
+
+**Field filters** — behavior depends on the field's data type:
+- `field:*` — field exists at all, e.g. `path:*`.
+- **string** fields use *prefix* search: `source:ChooseActiveParcel` matches
+  anything starting with that text. No `==` on string fields.
+- **number** fields use comparisons: `=`, `<`, `>`, `<=`, `>=` — e.g.
+  `total_time:>0.5`.
+- **boolean** fields use `==` — e.g. `safe:==true`.
+
+**Combining filters** — a space between filters defaults to `AND`.
+`source:ChooseActiveParcel OR source:FlangePathChecker` joins two result
+sets. Group with parentheses: `filter1 AND (filter2 OR filter3)`. Negate
+with a leading `-`: `-filter1 AND filter2` excludes filter1's matches.
+
+## Log message fields
+
+Mezmo log messages are JSON. Known fields:
+- `host` — the machine that logged the message (e.g. `wc3`, `eggplant`).
+- `app` — per Mezmo's docs, "the file the log message was written to"
+  (e.g. `fastloop.out.log`, `app.err.log`). **Open question:** it's not
+  confirmed whether this is a literal filename, a transform of a container
+  name (see the container list below), or something else — don't assume a
+  mapping (see ground rule 5).
+- `level` — e.g. `DEBUG`, `INFO`, `WARNING`. An `ERROR` level has not been
+  confirmed to exist — verify before filtering on `level:==ERROR` or
+  similar and assuming it will match anything.
+- `message` — the display text for the log line.
+- `source` — the name of the specific logger/class that wrote the message
+  (e.g. `ChooseActiveParcel`, `FlangePathChecker`) — more granular than
+  `app` or a container name.
+- Additional fields (timestamps, summaries, parcel data) may be present per
+  message; expand a line in Mezmo's UI ("Copy line context as JSON") to see
+  them for a specific case.
+
+## Dill app containers (glossary — what runs on the robot)
+
+Use this to understand what a log line's origin means when explaining it in
+plain English — not confirmed to map directly onto `app:` filter values
+(see above).
+
+| Container | What it does |
+|---|---|
+| `dill_app_camera` | Takes RGB + depth images (Zed 2i / Realsense d455); outputs dimensionalized packages and the point cloud |
+| `dill_app_taskloop` | Runs the behavior tree selecting robot control policies sent to the fastloop, ~10 Hz |
+| `dill_app_fastloop` | Runs the fastloop control loop — state observations and command processing, ~83.3 Hz (KUKA 12ms period) |
+| `dill_app_sound` | (Planned) plays desktop sounds to alert users of errors |
+| `dill_app_api-server` | Passes messages/state to the frontend — **likely** where UI-driven operator changes (spec/mode changes) are logged; exact filter value not yet confirmed |
+| `dill_app_microphone` | Deprecated. Listened for blower noise profile changes to detect grasping failure |
+| `dill_app_package_filtering` | GPU-accelerated filtering for the next package to pick (`ParcelTopmostFilter`, `ParcelCoveredFilter`, `ValidVolumeFilter`, `ParcelQualityFilter`, `PathPlanningFilter`) |
+| `dill_app_router` | Parses label-scanner data: pixel location + barcode in, pixel location + carrier + parsed info out |
+| `dill_app_rsi_proxy` | Buffers between the rest of the system and the KUKA arm, which requires messages at a specific rate |
+| `dill_app_mobile_base` | Processes joystick commands and drive-forward requests; keeps the robot centered via LIDAR in autonomous mode |
+| `dill_app_joystick` | External joystick driving control (PS5 controller) |
+| `dill_app_zmq_proxy` | All ZMQ pub/sub traffic passes through this — e.g. taskloop → mobile base messages |
+
+**Other containers** (mostly log processing / cloud upload, but expected to exist):
+
+| Container | What it does |
+|---|---|
+| `pickle_rosbridge` | Runs diagnostics (Foxglove/ROS visualization) and mobile-base LIDAR drivers; connects fastloop and taskloop |
+| `docuum` | Prevents stale Docker images from filling robot disk; configurable via `DOCUUM_THRESHOLD` |
+| `pickle_datadog` | Logging agent connecting to DataDog |
+| `pickle_logdna` | Logging agent connecting to Mezmo (formerly LogDNA) |
+| `dill_devcontainer-dill-1` | Dev container, non-production systems only |
+
 ## What counts as a "UI / operator change" (explicitly requested — always check for this)
 
 Operator actions taken through the UI (changing the package spec, switching
-modes, etc.) are typically logged by whichever backend/API service handles
-UI requests — look for that service's `app:` tag and phrasing like "Received
-request to..." or "Setting ... to" near a timestamp. **The exact `app:` tag
-and phrasing for this service is not yet confirmed — TODO: fill in once
-known.** Until then, if you find anything that looks like an operator-driven
-change (spec change, mode change, config change) via any tool, call it out
-explicitly in the timeline with the log line quoted, and flag in your
-summary that the exact search keyword for this category still needs to be
-pinned down by the team.
+modes, etc.) most likely surface through `dill_app_api-server` ("passes
+messages/state to the frontend" — see glossary above), with phrasing like
+"Received request to..." or "Setting ... to" near a timestamp. **This is a
+lead, not a confirmed filter value** — the exact `app:`/`source:` value and
+phrasing for this service still isn't confirmed (see the open question
+under "Log message fields"). Until it is, if you find anything that looks
+like an operator-driven change via any tool, call it out explicitly in the
+timeline with the log line quoted, and flag in your summary that the exact
+search keyword for this category still needs to be pinned down.
 
 ## Log keyword reference
 
@@ -130,7 +215,7 @@ pinned down by the team.
 |---|---|---|
 | Login/Logout times | `Received login request` | |
 | Intervention time | TODO — not yet defined | |
-| Rosbag started | `Starting recording to` OR `Recording to` (scope: `host:==gen1-prod1`) OR `start writing to bag file` (scope: `app:pickle_rosbridge`) | Confirm rosbag existence/timing |
+| Rosbag started | `Starting recording to` OR `Recording to` (scope: `host:gen1-prod1`) OR `start writing to bag file` (scope: `app:pickle_rosbridge`) | Confirm rosbag existence/timing |
 | Rosbag stopped | `stopped recording` | Confirms when recording ended |
 
 ### Package, picking, and placing
@@ -174,7 +259,7 @@ E-stops are critical — always call these out in the timeline and summary.
 
 | Issue | Keyword(s) to search | Notes |
 |---|---|---|
-| Out-of-moves (OOMV) | `mode.out_of_moves` | e.g. `host:==gen1-prod17 mode.out_of_moves`. Indicates the robot exhausted planning attempts |
+| Out-of-moves (OOMV) | `mode.out_of_moves` | e.g. `host:gen1-prod17 mode.out_of_moves`. Indicates the robot exhausted planning attempts |
 | Drive failed | `mode.drive_failed` | Indicates an issue with base motion |
 | Planner status | `Planning attempt` OR `plannerstatus` | Use to monitor the planning process generally |
 | Presence detected | TODO — not yet defined | A presence-detected error throws an internal ESTOP — also search `estop` for this |
