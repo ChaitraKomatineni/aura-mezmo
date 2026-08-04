@@ -23,11 +23,21 @@ description = "Live Mezmo log search, export, and pipeline monitoring"
 [mcp.servers.mezmo.headers]
 Authorization = "Bearer {{ env.MEZMO_API_KEY | default: '' }}"
 
+[mcp.servers.mezmo.scratchpad]
+"*" = { min_tokens = 2000 }
+
 # ── Uploaded logs — files a user drops in via the web UI ────────────
 [mcp.servers.logs]
 transport = "http_streamable"
 url = "http://logs-mcp:8091/mcp"
 description = "Search and read log files uploaded through the web UI"
+
+# Scratchpad interception thresholds are per-server and per-tool — enabling
+# [agent.scratchpad] alone does nothing without these. "*" catches every
+# tool this server exposes; a search over a session's worth of logs is
+# exactly the kind of output this is meant to divert.
+[mcp.servers.logs.scratchpad]
+"*" = { min_tokens = 2000 }
 
 # ── Freshdesk — bug ticket search ────────────────────────────────────
 [mcp.servers.freshdesk]
