@@ -81,6 +81,13 @@ in steps 2-3 seems like it might be missing real start/stop activity.
    stop and write the note anyway with what you found, and say explicitly
    which categories you didn't get to check — never fail silently with no
    output at all. A partial, honestly-labeled note is more useful than none.
+8. **Always write times in human-readable 12-hour format, never raw
+   `HH:MM:SS`.** These notes are for a person to skim and get the picture
+   quickly — "2:32 PM" reads instantly, "14:32:07" doesn't. Drop seconds;
+   minute precision is enough for a shift note. Use the log's actual
+   timestamp to *find* the second-level detail, but *display* the rounded,
+   12-hour form. (Internally you can still reason in whatever precision the
+   logs give you — this rule is about what appears in the written note.)
 
 ## Grouping vs. narrating — this is what makes it a "shift note" and not a log dump
 
@@ -93,8 +100,8 @@ a long window. Instead:
   note.
 - **Roll up into a count**: routine successful cycles, ordinary planner
   activity, and repeated non-error status messages. Report these as a
-  single line — e.g. "142 successful pick cycles between 06:00 and 14:00,
-  averaging ~28s each" — not one bullet per cycle.
+  single line — e.g. "142 successful pick cycles between 6:00 AM and
+  2:00 PM, averaging about 28 seconds each" — not one bullet per cycle.
 - If the same anomaly repeats many times (e.g. 30 conveyor-blocked aborts),
   report it as one entry with a count and the time range, not 30 entries.
 
@@ -103,13 +110,15 @@ a long window. Instead:
 ```
 # Shift Notes — <host/robot id if known> — <date/window covered>
 
-**Session:** started <HH:MM:SS>, ended <HH:MM:SS or "still active">
-**Rosbag recording:** started <HH:MM:SS>, stopped <HH:MM:SS>
+**Session:** started <e.g. "2:14 PM">, ended <e.g. "5:02 PM" or "still active">
+**Rosbag recording:** started <human time>, stopped <human time>
 **Production version:** <version, if found>
+**Out-of-moves events:** <count, or "none">
 
 ## Timeline
-- HH:MM:SS — <notable individual event, in plain English>
-- HH:MM:SS–HH:MM:SS — <rolled-up routine activity, with a count>
+- <human time> — <notable individual event, in plain English>
+  - If this is an out-of-moves event: Package specs enabled at the time: <N, or 0>
+- <human time>–<human time> — <rolled-up routine activity, with a count>
 ...
 
 ## Not checked
@@ -124,7 +133,32 @@ intervention, anything the next shift should watch for.>
 Order the timeline chronologically. Fold config/version info in as the first
 timeline entry rather than a separate section, unless the user only asked
 for config info. Omit the "Not checked" section entirely if nothing was
-skipped.
+skipped. See "Out-of-moves reporting" below for exactly how to fill in the
+count and per-event package-spec numbers.
+
+## Out-of-moves (OOMV) reporting — always required, not optional
+
+Whenever a session has any out-of-moves events (see `mode.out_of_moves` in
+the keyword reference below), report on them in full every time — this
+isn't conditional on the user asking specifically:
+
+1. **Count every occurrence** of the out-of-moves keyword within the
+   session window and put the total in the `**Out-of-moves events:**` line
+   near the top of the note (write "none" if zero — don't omit the line).
+2. **List each occurrence individually** in the Timeline (they're an
+   anomaly, so this is already required by "Grouping vs. narrating" —
+   don't collapse multiple out-of-moves events into one rolled-up count
+   even if there are many).
+3. **Under each individual occurrence**, look up the most recent
+   package-specs log entry at or before that event's timestamp (search
+   `app:vision active list of package_specs` OR `app:vision package
+   specs`) and report how many specs were listed as "Package specs enabled
+   at the time: N". If no package-specs entry exists before that
+   out-of-moves event anywhere in the available logs, report `0`, don't
+   omit the line.
+4. **If the package-specs log line's format doesn't make counting entries
+   straightforward** (e.g. it's not a clean list you can count), say so
+   explicitly next to that occurrence rather than guessing a number.
 
 ## Search syntax (Mezmo query language)
 
@@ -270,7 +304,7 @@ E-stops are critical — always call these out in the timeline and summary.
 
 | Issue | Keyword(s) to search | Notes |
 |---|---|---|
-| Out-of-moves (OOMV) | `mode.out_of_moves` | e.g. `host:gen1-prod17 mode.out_of_moves`. Indicates the robot exhausted planning attempts |
+| Out-of-moves (OOMV) | `mode.out_of_moves` | e.g. `host:gen1-prod17 mode.out_of_moves`. Indicates the robot exhausted planning attempts. **See "Out-of-moves reporting" above — count + package-spec lookup required every time, not just when asked.** |
 | Drive failed | `mode.drive_failed` | Indicates an issue with base motion |
 | Planner status | `Planning attempt` OR `plannerstatus` | Use to monitor the planning process generally |
 | Presence detected | TODO — not yet defined | A presence-detected error throws an internal ESTOP — also search `estop` for this |
