@@ -20,26 +20,32 @@ file on your own.
 1. **Require a session label before searching.** If the user hasn't given
    one, ask for it first rather than defaulting to the whole file or
    guessing which session they want.
-2. **Find that session's start.** Search `Received login request` combined
-   with the given label to locate the specific login event it identifies.
-   If nothing matches, say so and ask the user to double-check the label —
-   don't fall back to guessing by timestamp or picking the closest login.
-3. **Find where it stops.** The session ends at the next `Received login
-   request` after that one, a matching logout event, or the last log line
-   in the file if neither appears (mark it "still active" in that case).
-4. **Scope every other search in this skill to that start/stop window**
-   (e.g. add the time bound to `logs_search_logs` / `mezmo_*` calls). A
-   single real session should rarely need the grouping-into-counts
-   treatment described below, but apply it anyway if the session turns out
-   to run unusually long or be unusually eventful.
+2. **There is currently no confirmed keyword for a session's start/stop
+   marker.** (`Received login request` was tried and does not work — don't
+   use it.) Until a real one is confirmed, search using the label itself as
+   a plain text filter to find where that session's activity appears in
+   the logs, then treat the earliest matching timestamp as an *approximate*
+   start and the latest as an *approximate* stop.
+3. **Say explicitly that the start/stop times are approximate** based on
+   the first/last matches for the label, not a confirmed session-boundary
+   event — don't present them as exact. If the true start is likely earlier
+   than the first match (e.g. setup/config activity before the label
+   starts appearing), say that too rather than silently omitting it.
+4. **If searching the label finds nothing**, say so and ask the user to
+   double-check it — don't fall back to guessing by timestamp.
+5. **Scope every other search in this skill to that approximate start/stop
+   window** (e.g. add the time bound to `logs_search_logs` / `mezmo_*`
+   calls). A single real session should rarely need the
+   grouping-into-counts treatment described below, but apply it anyway if
+   the session turns out to run unusually long or be unusually eventful.
 
-**Open question — what does a "session label" actually look like?** It's
-not yet confirmed whether this is a literal token/ID that appears in the
-`Received login request` line itself (e.g. a session ID field), a
-timestamp the user names informally ("the 9am session"), or something
-else. Until confirmed: try it as a direct text filter alongside `Received
-login request` first; if that returns nothing, try treating it as a time
-reference instead and say explicitly which interpretation you used.
+**Open question — what does a "session label" actually look like, and is
+there a real start/stop marker?** Neither is confirmed yet: it's unclear
+whether the label is a literal token/ID that appears throughout a
+session's log lines, a timestamp the user names informally, or something
+else — and there's no known keyword yet for the actual moment a session
+starts or ends. Flag this to the user in your summary if the approximation
+in steps 2-3 seems like it might be missing real start/stop activity.
 
 ## Ground rules — read before searching
 
@@ -218,7 +224,7 @@ search keyword for this category still needs to be pinned down.
 
 | What | Keyword(s) to search | Notes |
 |---|---|---|
-| Login/Logout times | `Received login request` | |
+| Login/Logout times | TODO — not yet defined (see "Scope" above; `Received login request` was tried and does not work) | |
 | Intervention time | TODO — not yet defined | |
 | Rosbag started | `Starting recording to` OR `Recording to` (scope: `host:gen1-prod1`) OR `start writing to bag file` (scope: `app:pickle_rosbridge`) | Confirm rosbag existence/timing |
 | Rosbag stopped | `stopped recording` | Confirms when recording ended |
