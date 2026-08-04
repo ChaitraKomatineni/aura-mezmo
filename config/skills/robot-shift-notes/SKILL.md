@@ -11,16 +11,30 @@ engineer: name times, name events, skip jargon where a plain description
 works instead. A shift note is a triage-ready summary, not a raw event dump
 — see "Grouping vs. narrating" below before you start writing.
 
-## Scope — ask before searching a whole day of logs
+## Scope — find the session boundary yourself, don't sweep the whole file
 
-"Shift notes" implies a bounded working period (typically a few hours), not
-automatically the entire contents of whatever log file was provided. If the
-user hasn't given a specific time window and the available logs span more
-than ~4 hours, ask which window they actually want (a shift, an incident
-window, "the whole day") before running an exhaustive sweep — an
-undifferentiated full-day sweep is slow, tends to exhaust the tool-call
-budget, and produces a worse note than a scoped one. If they do want the
-whole day, follow the grouping rules below rather than listing every event.
+Real sessions are almost always under 4 hours. A log file (especially a
+full day's file) can contain more than one session, so scope to the actual
+session rather than treating the whole file as one shift:
+
+1. **First, find session boundaries.** Search `Received login request` to
+   find login timestamps. Each login starts a new session; a session ends
+   at the next login, at a matching logout, or at the last log line in the
+   file (mark it "still active" in that case). This should be your very
+   first search, before anything else in the keyword reference below.
+2. **If the user pointed at a specific time or named a session**, use the
+   session whose login is closest to that time.
+3. **If the user gave no time and the file contains exactly one session**,
+   just use it — no need to ask.
+4. **If the file contains multiple sessions and the user didn't specify
+   one**, don't guess: list the sessions you found (login time → end time)
+   and ask which one they want, rather than silently picking one or
+   sweeping across all of them.
+5. **Once you have the session's start/end, scope every other search in
+   this skill to that window** (e.g. add the time bound to `logs_search_logs`
+   / `mezmo_*` calls). A single real session should rarely need the
+   full-day grouping-into-counts treatment described below, but apply it
+   anyway if a session runs unusually long or unusually eventful.
 
 ## Ground rules — read before searching
 
