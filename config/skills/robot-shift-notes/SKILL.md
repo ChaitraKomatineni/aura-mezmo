@@ -11,30 +11,35 @@ engineer: name times, name events, skip jargon where a plain description
 works instead. A shift note is a triage-ready summary, not a raw event dump
 — see "Grouping vs. narrating" below before you start writing.
 
-## Scope — find the session boundary yourself, don't sweep the whole file
+## Scope — the user gives a session label; find where it starts and stops
 
-Real sessions are almost always under 4 hours. A log file (especially a
-full day's file) can contain more than one session, so scope to the actual
-session rather than treating the whole file as one shift:
+Shift notes are always for one specific session, and the user identifies
+which one — never infer or guess which session they mean from a full log
+file on your own.
 
-1. **First, find session boundaries.** Search `Received login request` to
-   find login timestamps. Each login starts a new session; a session ends
-   at the next login, at a matching logout, or at the last log line in the
-   file (mark it "still active" in that case). This should be your very
-   first search, before anything else in the keyword reference below.
-2. **If the user pointed at a specific time or named a session**, use the
-   session whose login is closest to that time.
-3. **If the user gave no time and the file contains exactly one session**,
-   just use it — no need to ask.
-4. **If the file contains multiple sessions and the user didn't specify
-   one**, don't guess: list the sessions you found (login time → end time)
-   and ask which one they want, rather than silently picking one or
-   sweeping across all of them.
-5. **Once you have the session's start/end, scope every other search in
-   this skill to that window** (e.g. add the time bound to `logs_search_logs`
-   / `mezmo_*` calls). A single real session should rarely need the
-   full-day grouping-into-counts treatment described below, but apply it
-   anyway if a session runs unusually long or unusually eventful.
+1. **Require a session label before searching.** If the user hasn't given
+   one, ask for it first rather than defaulting to the whole file or
+   guessing which session they want.
+2. **Find that session's start.** Search `Received login request` combined
+   with the given label to locate the specific login event it identifies.
+   If nothing matches, say so and ask the user to double-check the label —
+   don't fall back to guessing by timestamp or picking the closest login.
+3. **Find where it stops.** The session ends at the next `Received login
+   request` after that one, a matching logout event, or the last log line
+   in the file if neither appears (mark it "still active" in that case).
+4. **Scope every other search in this skill to that start/stop window**
+   (e.g. add the time bound to `logs_search_logs` / `mezmo_*` calls). A
+   single real session should rarely need the grouping-into-counts
+   treatment described below, but apply it anyway if the session turns out
+   to run unusually long or be unusually eventful.
+
+**Open question — what does a "session label" actually look like?** It's
+not yet confirmed whether this is a literal token/ID that appears in the
+`Received login request` line itself (e.g. a session ID field), a
+timestamp the user names informally ("the 9am session"), or something
+else. Until confirmed: try it as a direct text filter alongside `Received
+login request` first; if that returns nothing, try treating it as a time
+reference instead and say explicitly which interpretation you used.
 
 ## Ground rules — read before searching
 
