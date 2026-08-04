@@ -14,6 +14,14 @@ services:
       HOST: "0.0.0.0"
       PORT: "8080"
       CONFIG_PATH: "/app/config/aura.toml"
+
+      # Streaming — only emit the final synthesized answer to clients, not
+      # the agent's turn-by-turn tool-use narration or raw tool output.
+      # Without these, a simple chat UI (like ours) renders every
+      # intermediate "let me search for X..." step as if it were the answer.
+      AURA_CUSTOM_EVENTS: "true"
+      AURA_EMIT_REASONING: "false"
+      TOOL_RESULT_MODE: "none"
     volumes:
       - ./config/aura.toml:/app/config/aura.toml:ro
       - ./config/skills:/app/skills:ro

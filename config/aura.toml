@@ -7,6 +7,10 @@
 #
 # Changes take effect after: docker compose restart aura
 
+# Scratchpad storage location (must be writable inside the container).
+# Required once [agent.scratchpad].enabled = true below.
+memory_dir = "/tmp/aura-scratchpad"
+
 [mcp]
 sanitize_schemas = true
 
@@ -57,12 +61,29 @@ filters, and say explicitly if nothing matched within the given bounds.
 
 Be concise. Always say which tool/source a fact came from.
 """
-turn_depth = 8
+# Raised from the original default of 5-8: an exhaustive sweep across a
+# skill's full keyword reference (e.g. robot-shift-notes covers ~15
+# categories) easily takes 15-20+ tool calls before synthesis. Scratchpad
+# (below) adds its own turn_depth_bonus on top of this.
+turn_depth = 30
 
 [agent.llm]
 provider = "{{ env.LLM_PROVIDER }}"
 api_key = "{{ env.LLM_API_KEY }}"
 model = "{{ env.LLM_MODEL }}"
+# Context window for the configured model, in tokens. Required for
+# scratchpad (below). 200000 matches Claude Sonnet's standard window —
+# update this if you change LLM_MODEL to something with a different limit.
+context_window = 200000
+
+# ── Scratchpad ──────────────────────────────────────────────────────
+# Lets the agent explore large tool outputs (e.g. searching a full day of
+# logs) incrementally — via grep/slice/head-style exploration tools —
+# instead of pulling the entire result into context at once. Without this,
+# a big enough search result can overflow the context window and the
+# request errors out with nothing produced.
+[agent.scratchpad]
+enabled = true
 
 # ── Skills ──────────────────────────────────────────────────────────
 # Local skill sources: directories of SKILL.md-based instructions the

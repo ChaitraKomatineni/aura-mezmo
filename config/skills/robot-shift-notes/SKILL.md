@@ -4,11 +4,23 @@ description: Use when asked for shift notes, a session summary, or a plain-Engli
 ---
 # Robot Shift Notes
 
-Produce a chronological, plain-English narrative of a robot's session, as if
-someone had been watching both the physical robot and its logs and is now
-explaining what happened to the next-shift operator. Write for a person, not
-an engineer: name times, name events, skip jargon where a plain description
-works instead.
+Produce a plain-English shift note for a robot's session, as if someone had
+been watching both the physical robot and its logs and is now explaining
+what happened to the next-shift operator. Write for a person, not an
+engineer: name times, name events, skip jargon where a plain description
+works instead. A shift note is a triage-ready summary, not a raw event dump
+— see "Grouping vs. narrating" below before you start writing.
+
+## Scope — ask before searching a whole day of logs
+
+"Shift notes" implies a bounded working period (typically a few hours), not
+automatically the entire contents of whatever log file was provided. If the
+user hasn't given a specific time window and the available logs span more
+than ~4 hours, ask which window they actually want (a shift, an incident
+window, "the whole day") before running an exhaustive sweep — an
+undifferentiated full-day sweep is slow, tends to exhaust the tool-call
+budget, and produces a worse note than a scoped one. If they do want the
+whole day, follow the grouping rules below rather than listing every event.
 
 ## Ground rules — read before searching
 
@@ -29,20 +41,49 @@ works instead.
    keyword, not separate searches — e.g. `host:==gen1-prod17
    mode.out_of_moves` means "search for `mode.out_of_moves` scoped to host
    gen1-prod17".
+5. **If a search returns a very large result, don't try to hold it all in
+   context at once.** Use whatever exploration tools are available (grep,
+   slice, head-style tools) to narrow it down, or issue a tighter follow-up
+   search (add a time window or a more specific term) rather than reading
+   the entire raw output.
+6. **If you run out of tool-call budget before finishing the full sweep**,
+   stop and write the note anyway with what you found, and say explicitly
+   which categories you didn't get to check — never fail silently with no
+   output at all. A partial, honestly-labeled note is more useful than none.
+
+## Grouping vs. narrating — this is what makes it a "shift note" and not a log dump
+
+Don't give every matching log line its own timeline entry, especially over
+a long window. Instead:
+
+- **Narrate individually**: e-stops, box drops, aborted picks, interventions,
+  operator/UI-driven changes (spec/mode changes), and anything that isn't
+  the robot's normal operating pattern. These are why someone reads a shift
+  note.
+- **Roll up into a count**: routine successful cycles, ordinary planner
+  activity, and repeated non-error status messages. Report these as a
+  single line — e.g. "142 successful pick cycles between 06:00 and 14:00,
+  averaging ~28s each" — not one bullet per cycle.
+- If the same anomaly repeats many times (e.g. 30 conveyor-blocked aborts),
+  report it as one entry with a count and the time range, not 30 entries.
 
 ## Output format
 
 ```
-# Shift Notes — <host/robot id if known> — <date>
+# Shift Notes — <host/robot id if known> — <date/window covered>
 
 **Session:** started <HH:MM:SS>, ended <HH:MM:SS or "still active">
 **Rosbag recording:** started <HH:MM:SS>, stopped <HH:MM:SS>
 **Production version:** <version, if found>
 
 ## Timeline
-- HH:MM:SS — <plain-English event description>
-- HH:MM:SS — <plain-English event description>
+- HH:MM:SS — <notable individual event, in plain English>
+- HH:MM:SS–HH:MM:SS — <rolled-up routine activity, with a count>
 ...
+
+## Not checked
+<Only if you ran out of budget or a keyword is undefined: list which
+categories weren't verified, so the reader knows the gaps.>
 
 ## Summary
 <3-5 sentences: overall how the shift went, anything that needed
@@ -51,7 +92,8 @@ intervention, anything the next shift should watch for.>
 
 Order the timeline chronologically. Fold config/version info in as the first
 timeline entry rather than a separate section, unless the user only asked
-for config info.
+for config info. Omit the "Not checked" section entirely if nothing was
+skipped.
 
 ## What counts as a "UI / operator change" (explicitly requested — always check for this)
 

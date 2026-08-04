@@ -51,7 +51,15 @@ Everything works without Mezmo/Freshdesk/Domo credentials except those tabs — 
 
 Each subdirectory of `config/skills/` is one skill: a `SKILL.md` with a `name` + `description` in its YAML frontmatter, plus the actual instructions as Markdown body. Only the name/description sit in the system prompt at all times (cheap); the full body loads only when the agent calls `load_skill` because a request seems relevant, and any `references/`/`scripts/`/`assets/` files inside the skill load one-by-one via `read_skill_file` if needed.
 
-`robot-shift-notes` ships as an example: a reference table of log keywords (rosbag start/stop, e-stops, package drops, conveyor blocks, motion planning failures, etc.) plus an output format spec, so asking Aura for "shift notes for gen1-prod17's last session" produces a chronological, plain-English writeup grounded in actual log search results — not a guess. A few keyword rows are marked `TODO` in that file where the exact search term wasn't provided yet; fill those in as they're confirmed.
+`robot-shift-notes` ships as an example: a reference table of log keywords (rosbag start/stop, e-stops, package drops, conveyor blocks, motion planning failures, etc.) plus an output format spec, so asking Aura for "shift notes for gen1-prod17's last session" produces a plain-English writeup grounded in actual log search results — not a guess. A few keyword rows are marked `TODO` in that file where the exact search term wasn't provided yet; fill those in as they're confirmed. The skill also tells the agent to group routine activity into counts and only narrate anomalies individually (a raw event-per-line dump over a full day isn't a shift note), and to write a partial note rather than nothing if it runs out of tool-call budget partway through.
+
+### Notes on running this against a full day of logs
+
+Searching a whole day's worth of logs across many keyword categories is a lot of tool calls and can return large results. Three things in this config exist specifically for that:
+
+- `AURA_CUSTOM_EVENTS`, `AURA_EMIT_REASONING: "false"`, and `TOOL_RESULT_MODE: "none"` on the `aura` service in `docker-compose.yml` keep the chat UI showing only the final answer, not the agent's turn-by-turn tool-use narration.
+- `turn_depth = 30` in `config/aura.toml` (up from the original default of 5-8) gives an exhaustive sweep enough tool-calling rounds to actually finish.
+- `[agent.scratchpad]` with `enabled = true`, plus `memory_dir` and `[agent.llm].context_window`, lets the agent explore large search results incrementally instead of dumping them straight into context (which is what causes an upstream "provider returned an error" failure on big enough inputs). If you switch `LLM_MODEL` to something with a different context limit, update `context_window` to match.
 
 To add another skill: `mkdir config/skills/my-skill-name`, add a `SKILL.md` with matching `name` in the frontmatter, and restart the `aura` container — no other config changes needed, since `config/aura.toml` already points `[[agent.skills.local]]` at `/app/skills` (mounted from `config/skills/` in `docker-compose.yml`).
 
