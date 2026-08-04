@@ -9,6 +9,7 @@ A playground to test out the features of [Aura by Mezmo](https://github.com/mezm
 - **`services/logs-mcp/`** — MCP server exposing uploaded log files as tools (`list_uploaded_logs`, `read_log`, `search_logs`).
 - **`services/freshdesk-mcp/`** — MCP server wrapping the Freshdesk API v2 (`search_tickets`, `get_ticket`, `list_recent_tickets`).
 - **`docker-compose.yml`** — wires all of the above together plus the `mezmo/aura:latest` agent image.
+- **`config/skills/`** — Agent Skills (agentskills.io spec, same format Claude uses): folders of `SKILL.md` files with static domain knowledge the agent loads on demand via `load_skill`/`read_skill_file`, rather than always sitting in the system prompt. Ships with `robot-shift-notes` — a log-keyword reference + output format for generating plain-English shift notes from robot/Mezmo logs.
 
 ## Quickstart
 
@@ -44,6 +45,15 @@ Everything works without Mezmo/Freshdesk/Domo credentials except those tabs — 
 
 - Per-action prompt templates (what exact text gets sent to chat for each button) are in `web/public/index.html`'s `<script>` — search for `sendChat(` calls.
 - The agent's overall behavior (tool usage, citing sources, how strictly to honor filters) is `system_prompt` in `config/aura.toml`.
+- Stable, long-form domain knowledge (glossaries, runbooks, keyword references) belongs in `config/skills/` instead of the system prompt — see below.
+
+## Skills
+
+Each subdirectory of `config/skills/` is one skill: a `SKILL.md` with a `name` + `description` in its YAML frontmatter, plus the actual instructions as Markdown body. Only the name/description sit in the system prompt at all times (cheap); the full body loads only when the agent calls `load_skill` because a request seems relevant, and any `references/`/`scripts/`/`assets/` files inside the skill load one-by-one via `read_skill_file` if needed.
+
+`robot-shift-notes` ships as an example: a reference table of log keywords (rosbag start/stop, e-stops, package drops, conveyor blocks, motion planning failures, etc.) plus an output format spec, so asking Aura for "shift notes for gen1-prod17's last session" produces a chronological, plain-English writeup grounded in actual log search results — not a guess. A few keyword rows are marked `TODO` in that file where the exact search term wasn't provided yet; fill those in as they're confirmed.
+
+To add another skill: `mkdir config/skills/my-skill-name`, add a `SKILL.md` with matching `name` in the frontmatter, and restart the `aura` container — no other config changes needed, since `config/aura.toml` already points `[[agent.skills.local]]` at `/app/skills` (mounted from `config/skills/` in `docker-compose.yml`).
 
 ## Extending
 

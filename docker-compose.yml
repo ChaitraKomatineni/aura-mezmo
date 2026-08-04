@@ -16,6 +16,7 @@ services:
       CONFIG_PATH: "/app/config/aura.toml"
     volumes:
       - ./config/aura.toml:/app/config/aura.toml:ro
+      - ./config/skills:/app/skills:ro
     depends_on:
       logs-mcp:
         condition: service_healthy

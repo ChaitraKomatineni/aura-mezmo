@@ -63,3 +63,10 @@ turn_depth = 8
 provider = "{{ env.LLM_PROVIDER }}"
 api_key = "{{ env.LLM_API_KEY }}"
 model = "{{ env.LLM_MODEL }}"
+
+# ── Skills ──────────────────────────────────────────────────────────
+# Local skill sources: directories of SKILL.md-based instructions the
+# agent can load on demand (see config/skills/). Path is inside the
+# aura container — mounted from ./config/skills in docker-compose.yml.
+[[agent.skills.local]]
+source = "/app/skills"
