@@ -105,6 +105,13 @@ in steps 2-3 seems like it might be missing real start/stop activity.
    could be wrong in ways a keyword-backed finding wouldn't be. Don't blend
    this kind of finding in silently next to the keyword-backed ones without
    flagging which is which.
+10. **Before presenting the note, verify it against this checklist**: every
+    quoted log line actually exists in a tool result you called, not
+    paraphrased from memory; every out-of-moves entry has a real
+    package-spec lookup behind its number, not a guess; every time shown is
+    12-hour human-readable, not raw `HH:MM:SS`; anything you didn't get to
+    is listed under "Not checked," not silently dropped. Fix anything that
+    fails this check before showing the note to the user.
 
 ## Grouping vs. narrating — this is what makes it a "shift note" and not a log dump
 
@@ -151,7 +158,8 @@ Order the timeline chronologically. Fold config/version info in as the first
 timeline entry rather than a separate section, unless the user only asked
 for config info. Omit the "Not checked" section entirely if nothing was
 skipped. See "Out-of-moves reporting" below for exactly how to fill in the
-count and per-event package-spec numbers.
+count and per-event package-spec numbers, and "Examples" below for a full
+worked note.
 
 ## Out-of-moves (OOMV) reporting — always required, not optional
 
@@ -176,6 +184,105 @@ isn't conditional on the user asking specifically:
 4. **If the package-specs log line's format doesn't make counting entries
    straightforward** (e.g. it's not a clean list you can count), say so
    explicitly next to that occurrence rather than guessing a number.
+
+## Examples
+
+The examples below show the expected format and reasoning in practice. The
+first is real, from an actual session analyzed in this project — its facts
+are exactly what searching the real logs turned up, including its gaps. The
+rest are illustrative: built to demonstrate a format or a rule, not drawn
+from a real session. Never treat the illustrative examples as confirmed
+facts about any real robot, host, or session.
+
+<examples>
+
+<example illustrative="false">
+Real — session 08-03-26-D51-CPU-T-48-872587 on gen1-prod16, from the actual
+logs analyzed in this project (host only exposed `taskloop`/`api-server` in
+this export — see the gaps this note discloses below).
+
+```
+# Shift Notes — gen1-prod16 — Aug 3, 2026
+
+**Session:** started 1:13 PM, ended 3:05 PM
+**Rosbag recording:** not found in the available logs
+**Production version:** not found in the available logs
+**Out-of-moves events:** none found in the available data (see "Not checked" — this export doesn't include the apps that would carry that keyword)
+
+## Timeline
+- 1:13 PM — Operator set the session label via the UI (`POST request on /api/workload_label`, `request_data: {"session_label": "08-03-26-D51-CPU-T-48-872587"}`). This is also the session's start.
+- 1:13 PM–3:05 PM — 13 interventions recorded over the session (rolling `intervention_count` field, roughly one every 8-9 minutes). No individual log line describes what any single intervention was — this comes from a periodic stats snapshot, not a per-event message — so they're reported as a count rather than invented as 13 distinct descriptions.
+- 3:05 PM — Session ended (`Ending container: container label is 08-03-26-D51-CPU-T-48-872587.`).
+
+## Not checked
+- Rosbag start/stop and production version: no matching log lines found in this export.
+- Out-of-moves events: `app:vision`/`app:action` — the categories that would carry `mode.out_of_moves` — aren't present in this export at all. "None found" means "none in what's available," not a confirmed zero for the whole session.
+
+## Summary
+447 packages succeeded and 45 failed (19 dropped, 1 dropped on conveyor, 26 grasp failures) over roughly 1 hour 51 minutes. 13 interventions were needed, but the available logs don't show what triggered each one individually. No e-stops or UI-driven changes turned up beyond the operator setting the session label at the start — though that's partly a coverage gap in this export, not a confirmed absence.
+```
+
+This demonstrates: reporting a real gap as "not found" rather than guessing (ground rule 1, 2); refusing to invent 13 individual descriptions for the interventions even though ground rule normally calls for narrating anomalies individually — when the only evidence is a counter with no distinguishing detail, a count is the honest option, not a fabrication; and being explicit that "none found" can mean "not covered by this data" rather than "confirmed zero."
+</example>
+
+<example illustrative="true">
+Illustrative only — demonstrates out-of-moves formatting, not a real finding.
+
+```
+**Out-of-moves events:** 2
+
+## Timeline
+- 9:47 AM — Out-of-moves event (`mode.out_of_moves`, host:gen1-prod22).
+  - Package specs enabled at the time: 14
+- 11:02 AM — Out-of-moves event (`mode.out_of_moves`, host:gen1-prod22).
+  - Package specs enabled at the time: 0
+```
+
+This demonstrates: counting every occurrence into the header line; listing
+each one individually rather than rolled into a count, per the out-of-moves
+reporting rules; and reporting `0` plainly when no package-specs entry
+exists before an occurrence, rather than omitting the line.
+</example>
+
+<example illustrative="true">
+Illustrative only — demonstrates e-stop root-cause tracing, not a real finding.
+
+```
+- 2:15 PM — E-stop (`ESTOP detected with reason`). Root cause traced by
+  reading backward ~18 lines to `[USER EXCEPTION] [-10] Arm is not enabled`,
+  reason code 12 ("Safety gate opened during active cycle" per the Estop
+  Reason Codes reference).
+```
+
+This demonstrates: using the primary search, then reading backward from the
+secondary line to find the actual cause, then resolving the reason code
+against the reference — rather than reporting the e-stop with no root cause.
+</example>
+
+<example illustrative="true">
+Illustrative only — demonstrates the ground rule 9 fallback for a question
+outside the keyword reference, not a real finding.
+
+User asks: "Did the camera ever lose calibration during this session?" — no
+keyword reference row covers this.
+
+```
+Finding (not keyword-backed — my own read of the logs; treat this as a lead,
+not a confirmed finding): searching broadly for calibration-related terms
+turned up two lines mentioning "recalibrating extrinsics" from `app:camera`,
+about two minutes apart around 10:42 AM. This might indicate a brief
+calibration issue, but there's no confirmed keyword for this category yet,
+so don't treat this with the same confidence as the keyword-backed findings
+above.
+```
+
+This demonstrates: exploring instead of refusing when nothing in the
+keyword reference matches; still quoting a real line rather than inventing
+one; and flagging the finding's lower confidence explicitly rather than
+presenting it alongside confirmed findings unmarked.
+</example>
+
+</examples>
 
 ## Search syntax (Mezmo query language)
 
