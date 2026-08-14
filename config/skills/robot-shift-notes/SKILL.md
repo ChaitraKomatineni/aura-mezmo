@@ -15,37 +15,45 @@ works instead. A shift note is a triage-ready summary, not a raw event dump
 
 Shift notes are always for one specific session, and the user identifies
 which one — never infer or guess which session they mean from a full log
-file on your own.
+file on your own. A session means the robot is actively in a container,
+picking boxes — everything between its confirmed start and stop is what
+counts as "the session."
 
 1. **Require a session label before searching.** If the user hasn't given
    one, ask for it first rather than defaulting to the whole file or
    guessing which session they want.
-2. **There is currently no confirmed keyword for a session's start/stop
-   marker.** (`Received login request` was tried and does not work — don't
-   use it.) Until a real one is confirmed, search using the label itself as
-   a plain text filter to find where that session's activity appears in
-   the logs, then treat the earliest matching timestamp as an *approximate*
-   start and the latest as an *approximate* stop.
-3. **Say explicitly that the start/stop times are approximate** based on
-   the first/last matches for the label, not a confirmed session-boundary
-   event — don't present them as exact. If the true start is likely earlier
-   than the first match (e.g. setup/config activity before the label
-   starts appearing), say that too rather than silently omitting it.
-4. **If searching the label finds nothing**, say so and ask the user to
-   double-check it — don't fall back to guessing by timestamp.
-5. **Scope every other search in this skill to that approximate start/stop
+2. **The confirmed start/stop marker is the taskloop container tracker's
+   INFO-level log line.** Search `level:INFO "Starting container"` and
+   `level:INFO "Ending container"`, scoped to the session label — e.g.
+   `Starting container: container label is 08-03-26-D51-CPU-T-48-872587.`
+   / `Ending container: container label is 08-03-26-D51-CPU-T-48-872587.`,
+   from `app:taskloop`. This replaces the earlier, unconfirmed approach of
+   treating the label's first/last text match as an *approximate* boundary
+   — this is a real, confirmed boundary event, not an approximation.
+   (`Received login request` was tried earlier and does not work — don't
+   use it.)
+3. **Use the *first* "Starting container" line and the *last* "Ending
+   container" line for that label as the session's true start and stop.**
+   A label can have more than one Starting/Ending pair if the operator logs
+   out and back in during the session (e.g. for a break). Don't treat an
+   inner pair as a separate session or as the real boundary — only the
+   outermost first-start and last-stop count as the session's actual start
+   and stop.
+4. **Report any inner Starting/Ending pairs as a logout, not as part of
+   active operation.** If a label's "Starting container"/"Ending container"
+   lines appear more than once, call out each gap explicitly — e.g.
+   "operator logged out between 11:42 AM and 12:05 PM" — rather than
+   silently folding that time into the active session or dropping it. This
+   pattern hasn't shown up yet in a real session analyzed so far, so if what
+   you actually find looks different (e.g. overlapping labels, out-of-order
+   timestamps), say so rather than forcing it to fit.
+5. **If searching finds nothing**, say so and ask the user to double-check
+   the label — don't fall back to guessing by timestamp.
+6. **Scope every other search in this skill to the confirmed start/stop
    window** (e.g. add the time bound to `logs_search_logs` / `mezmo_*`
    calls). A single real session should rarely need the
    grouping-into-counts treatment described below, but apply it anyway if
    the session turns out to run unusually long or be unusually eventful.
-
-**Open question — what does a "session label" actually look like, and is
-there a real start/stop marker?** Neither is confirmed yet: it's unclear
-whether the label is a literal token/ID that appears throughout a
-session's log lines, a timestamp the user names informally, or something
-else — and there's no known keyword yet for the actual moment a session
-starts or ends. Flag this to the user in your summary if the approximation
-in steps 2-3 seems like it might be missing real start/stop activity.
 
 ## Ground rules — read before searching
 
@@ -382,7 +390,7 @@ search keyword for this category still needs to be pinned down.
 
 | What | Keyword(s) to search | Notes |
 |---|---|---|
-| Login/Logout times | TODO — not yet defined (see "Scope" above; `Received login request` was tried and does not work) | |
+| Login/Logout (session start/stop) | `level:INFO "Starting container"` / `level:INFO "Ending container"`, scoped to the session label, `app:taskloop` | Confirmed — see "Scope" above. First Starting + last Ending = session boundary; inner pairs = a mid-session logout, report as a gap. |
 | Intervention time | TODO — not yet defined | |
 | Rosbag started | `Starting recording to` OR `Recording to` (scope: `host:gen1-prod1`) OR `start writing to bag file` (scope: `app:pickle_rosbridge`) | Confirm rosbag existence/timing |
 | Rosbag stopped | `stopped recording` | Confirms when recording ended |
