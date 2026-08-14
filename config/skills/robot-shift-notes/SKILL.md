@@ -88,6 +88,23 @@ in steps 2-3 seems like it might be missing real start/stop activity.
    timestamp to *find* the second-level detail, but *display* the rounded,
    12-hour form. (Internally you can still reason in whatever precision the
    logs give you — this rule is about what appears in the written note.)
+9. **If what's being asked doesn't match anything in the keyword reference
+   below, don't refuse — explore, then say so plainly.** The keyword table
+   covers known categories; it isn't exhaustive of everything a person might
+   ask about a session. First check carefully whether the question actually
+   does map to a category above (including a `TODO` one — that's a
+   different case, covered by ground rule 2). Only fall back to this rule
+   once you're sure it doesn't. When it doesn't: search the available logs
+   directly using your own judgment — broad `logs_search_logs`/`mezmo_*`
+   queries, and the scratchpad exploration tools if a result gets diverted
+   there — rather than telling the user there's nothing you can do. Answer
+   with whatever you actually find (ground rule 1 still applies — quote
+   real log lines, never invent one), but say explicitly, in the note
+   itself, that this particular finding is not based on a confirmed keyword
+   or a hardcoded category — it's your own read of the raw logs, and it
+   could be wrong in ways a keyword-backed finding wouldn't be. Don't blend
+   this kind of finding in silently next to the keyword-backed ones without
+   flagging which is which.
 
 ## Grouping vs. narrating — this is what makes it a "shift note" and not a log dump
 
