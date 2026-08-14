@@ -5,7 +5,7 @@ A playground to test out the features of [Aura by Mezmo](https://github.com/mezm
 ## What's here
 
 - **`config/aura.toml`** — the Aura agent config. Registers three MCP tool sources: `mezmo` (hosted, live log search/export), `logs` (local, uploaded files), `freshdesk` (local, bug ticket search).
-- **`web/`** — a small FastAPI app serving the control-panel UI (`web/public/index.html`): a chat panel plus tabs for uploading logs, querying live logs, and searching Freshdesk.
+- **`web/`** — a small FastAPI app serving the control-panel UI (`web/public/index.html`): a chat panel plus tabs for uploading logs, querying live logs, searching Freshdesk, and authoring skills.
 - **`services/logs-mcp/`** — MCP server exposing uploaded log files as tools (`list_uploaded_logs`, `read_log`, `search_logs`).
 - **`services/freshdesk-mcp/`** — MCP server wrapping the Freshdesk API v2 (`search_tickets`, `get_ticket`, `list_recent_tickets`).
 - **`docker-compose.yml`** — wires all of the above together plus the `mezmo/aura:latest` agent image.
@@ -27,9 +27,8 @@ Open **http://localhost:3000** for the control panel.
 | `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | the agent to run at all | any provider Aura supports (anthropic, openai, bedrock, ...) |
 | `MEZMO_API_KEY` | the "Live Logs" tab | Mezmo's hosted MCP server; omit and that tab's queries will just report no access |
 | `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY` | the "Freshdesk Bugs" tab | domain is the subdomain, e.g. `acme` for `acme.freshdesk.com` |
-| `DOMO_EMBED_URL` | the "Domo" tab (optional) | a Domo Card/Page's Share > Embed URL; can also be pasted directly into the tab instead |
 
-Everything works without Mezmo/Freshdesk/Domo credentials except those tabs — the chat and log-upload flow run standalone.
+Everything works without Mezmo/Freshdesk credentials except those tabs — the chat, log-upload, and skills flows run standalone.
 
 ## How the pieces map to the ask
 
@@ -39,7 +38,7 @@ Everything works without Mezmo/Freshdesk/Domo credentials except those tabs — 
 
 **Freshdesk correlation, filtered from the ticket itself.** The "Freshdesk Bugs" tab loads automatically with every ticket from the last 2 days (change the dropdown for 1/7/30 days, or use the search box instead). Click "View" on any row to expand its full description, tags, and timestamps inline — no separate tool needed to read a ticket. Click "Correlate with logs" and, before asking Aura anything, the UI fetches the ticket's full details and prefills an editable filter panel: a service/keyword guess (from the subject), a time window (±30 min around when the ticket was created), and a log-level filter. Adjust anything, then "Run correlation" — the prompt sent to Aura includes the ticket description plus those exact filters, and `config/aura.toml`'s system prompt instructs the agent to treat them as hard constraints rather than re-guessing its own.
 
-**Domo (display only).** The "Domo" tab is a plain iframe embed of a Domo Card/Page — paste a Share > Embed URL (or set `DOMO_EMBED_URL`) and it persists in the browser. No data flows between Aura and Domo; it's just a dashboard panel alongside the rest of the playground.
+**Skills, authored from the browser.** The "Skills" tab is a UI-only front end for `config/skills/` — meant for sharing this playground with people who get the chatbot but not code access. It lists every skill (including the built-in `robot-shift-notes`, marked "built-in"), and "+ New skill" opens a form for a name, a description (what it does + when Aura should reach for it — this sits in Aura's system prompt at all times, so it's worth being specific), and Markdown instructions (a starter template is prefilled). Click any card to edit or delete it. Because Aura only discovers skills at startup (see "Skills" below), saving shows a banner reminding whoever is hosting this deployment to run `docker compose restart aura` before the change is live in chat — this app can create/edit the files, but it deliberately can't restart Aura itself, since a shared multi-person deployment shouldn't let any one visitor interrupt everyone else's conversation to test a skill.
 
 ## Where the prompts live, if you want to tune them further
 
@@ -61,7 +60,14 @@ Searching a whole day's worth of logs across many keyword categories is a lot of
 - `turn_depth = 30` in `config/aura.toml` (up from the original default of 5-8) gives an exhaustive sweep enough tool-calling rounds to actually finish.
 - `[agent.scratchpad]` with `enabled = true`, plus `memory_dir` and `[agent.llm].context_window`, lets the agent explore large search results incrementally instead of dumping them straight into context (which is what causes an upstream "provider returned an error" failure on big enough inputs). If you switch `LLM_MODEL` to something with a different context limit, update `context_window` to match.
 
-To add another skill: `mkdir config/skills/my-skill-name`, add a `SKILL.md` with matching `name` in the frontmatter, and restart the `aura` container — no other config changes needed, since `config/aura.toml` already points `[[agent.skills.local]]` at `/app/skills` (mounted from `config/skills/` in `docker-compose.yml`).
+To add another skill, either use the "Skills" tab in the UI (no code access needed — see above), or by hand: `mkdir config/skills/my-skill-name`, add a `SKILL.md` with matching `name` in the frontmatter, and restart the `aura` container. Either way, no other config changes are needed, since `config/aura.toml` already points `[[agent.skills.local]]` at `/app/skills` (mounted from `config/skills/` in `docker-compose.yml`), and a restart is required either way since Aura only scans that directory at startup.
+
+## Sharing this with other people
+
+If you're handing this playground to people who should only get the chatbot/UI — not the repo, not edit access to `config/aura.toml` or the Docker setup — give them the URL for the `web` service (port 3000) and nothing else. The "Upload Logs", "Live Logs", "Freshdesk Bugs", and "Skills" tabs are all just friendlier front ends for things Aura can already do or files it already reads; none of them expose the underlying code or let a visitor touch anything outside `config/skills/`. Two things worth knowing before you do this:
+
+- **No login.** Nothing in this repo gates who can reach the `web` service — anyone with the URL can chat, upload logs, and create/edit/delete skills. That's fine for a small trusted group; put it behind whatever auth (a reverse proxy, a VPN, Tailscale, etc.) makes sense if the audience is bigger than that.
+- **Skill changes need a restart.** New or edited skills only take effect after the `aura` container restarts (see above) — a deliberate choice so that no visitor can restart Aura themselves and interrupt everyone else's in-flight conversation. As the operator, restart it yourself (`docker compose restart aura`) after skill edits land, or on whatever cadence makes sense for your group.
 
 ## Extending
 

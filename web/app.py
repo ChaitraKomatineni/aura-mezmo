@@ -1,9 +1,16 @@
 """
 Aura Mezmo Playground — web control panel
 
-Small FastAPI app serving the single-page UI plus three backend concerns:
+Small FastAPI app serving the single-page UI plus four backend concerns:
   - /api/upload, /api/logs   — log file upload + listing (feeds logs-mcp)
   - /api/freshdesk/search    — direct Freshdesk ticket search for the UI
+  - /api/skills              — CRUD for config/skills/*/SKILL.md, so people
+                                without code access can author Agent Skills
+                                through the "Skills" tab instead of editing
+                                files directly. Aura only discovers skills at
+                                startup, so a change here needs an operator
+                                to run `docker compose restart aura` before
+                                it's live in chat — the UI says so.
   - /api/chat                — pass-through streaming proxy to Aura's
                                 OpenAI-compatible /v1/chat/completions
 
@@ -14,22 +21,26 @@ this app's Freshdesk/logs endpoints are for human browsing in the UI.
 
 import os
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, Query, UploadFile
+import yaml
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 AURA_BASE_URL = os.environ.get("AURA_BASE_URL", "http://aura:8080")
 AURA_MODEL = os.environ.get("AURA_MODEL", "aura-mezmo")
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
 FRESHDESK_DOMAIN = os.environ.get("FRESHDESK_DOMAIN", "")
 FRESHDESK_API_KEY = os.environ.get("FRESHDESK_API_KEY", "")
-DOMO_EMBED_URL = os.environ.get("DOMO_EMBED_URL", "")
+SKILLS_DIR = Path(os.environ.get("SKILLS_DIR", "/app/skills"))
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def freshdesk_base_url() -> str:
@@ -57,7 +68,7 @@ def health():
 @app.get("/api/config")
 def config():
     """Client-side config the UI prefills itself with (no secrets)."""
-    return {"domo_embed_url": DOMO_EMBED_URL}
+    return {}
 
 
 @app.post("/api/upload")
@@ -77,6 +88,132 @@ def list_logs():
         if p.is_file()
     ]
     return {"files": files}
+
+
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+class SkillCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str = Field(..., min_length=1, max_length=1024)
+    body: str = Field(..., min_length=1)
+
+
+class SkillUpdate(BaseModel):
+    description: str = Field(..., min_length=1, max_length=1024)
+    body: str = Field(..., min_length=1)
+
+
+def validate_skill_name(name: str) -> None:
+    """Mirror Aura's own SKILL.md name rules (agentskills.io spec) so a skill
+    saved here is guaranteed to be one Aura will actually discover: 1-64
+    chars, lowercase alphanumerics and hyphens, no leading/trailing/double
+    hyphens."""
+    if not name or len(name) > 64:
+        raise HTTPException(400, f"Skill name must be 1-64 characters, got {len(name)}.")
+    if not SKILL_NAME_RE.match(name):
+        raise HTTPException(
+            400,
+            "Skill name can only use lowercase letters, digits, and single hyphens "
+            "(no leading/trailing/double hyphens) — e.g. 'my-new-skill'.",
+        )
+
+
+def skill_dir(name: str) -> Path:
+    """Resolve a skill's directory, refusing anything that would escape
+    SKILLS_DIR even though validate_skill_name already blocks the
+    characters needed to do that."""
+    validate_skill_name(name)
+    candidate = (SKILLS_DIR / name).resolve()
+    if candidate.parent != SKILLS_DIR.resolve():
+        raise HTTPException(400, "Invalid skill name.")
+    return candidate
+
+
+def read_skill_md(path: Path) -> dict:
+    """Parse a SKILL.md's YAML frontmatter + body."""
+    content = path.read_text(encoding="utf-8")
+    if not content.lstrip().startswith("---"):
+        raise HTTPException(500, f"{path} is missing YAML frontmatter.")
+    after_first = content.lstrip()[3:]
+    closing = after_first.find("---")
+    if closing == -1:
+        raise HTTPException(500, f"{path} is missing a closing '---'.")
+    frontmatter = yaml.safe_load(after_first[:closing]) or {}
+    body = after_first[closing + 3 :].lstrip("\n")
+    return {
+        "name": frontmatter.get("name", ""),
+        "description": frontmatter.get("description", ""),
+        "body": body,
+    }
+
+
+def write_skill_md(path: Path, name: str, description: str, body: str) -> None:
+    frontmatter = yaml.safe_dump(
+        {"name": name, "description": description}, sort_keys=False
+    )
+    path.write_text(f"---\n{frontmatter}---\n{body.rstrip()}\n", encoding="utf-8")
+
+
+@app.get("/api/skills")
+def list_skills():
+    """All skills currently on disk, newest-edited first. Note: this reads
+    straight from config/skills — it does not tell you whether Aura has
+    picked up a given change yet (it only re-scans skills on startup)."""
+    skills = []
+    if SKILLS_DIR.exists():
+        for entry in sorted(SKILLS_DIR.iterdir()):
+            skill_file = entry / "SKILL.md"
+            if entry.is_dir() and skill_file.exists():
+                parsed = read_skill_md(skill_file)
+                skills.append(
+                    {
+                        "name": entry.name,
+                        "description": parsed["description"],
+                        "updated_at": skill_file.stat().st_mtime,
+                    }
+                )
+    skills.sort(key=lambda s: s["updated_at"], reverse=True)
+    return {"skills": skills}
+
+
+@app.get("/api/skills/{name}")
+def get_skill(name: str):
+    path = skill_dir(name) / "SKILL.md"
+    if not path.exists():
+        raise HTTPException(404, f"No skill named '{name}'.")
+    parsed = read_skill_md(path)
+    return {"name": name, "description": parsed["description"], "body": parsed["body"]}
+
+
+@app.post("/api/skills")
+def create_skill(skill: SkillCreate):
+    validate_skill_name(skill.name)
+    path = skill_dir(skill.name)
+    if path.exists():
+        raise HTTPException(409, f"A skill named '{skill.name}' already exists.")
+    path.mkdir(parents=True)
+    write_skill_md(path / "SKILL.md", skill.name, skill.description, skill.body)
+    return {"name": skill.name, "restart_required": True}
+
+
+@app.put("/api/skills/{name}")
+def update_skill(name: str, skill: SkillUpdate):
+    path = skill_dir(name)
+    skill_file = path / "SKILL.md"
+    if not skill_file.exists():
+        raise HTTPException(404, f"No skill named '{name}'.")
+    write_skill_md(skill_file, name, skill.description, skill.body)
+    return {"name": name, "restart_required": True}
+
+
+@app.delete("/api/skills/{name}")
+def delete_skill(name: str):
+    path = skill_dir(name)
+    if not path.exists():
+        raise HTTPException(404, f"No skill named '{name}'.")
+    shutil.rmtree(path)
+    return {"name": name, "restart_required": True}
 
 
 @app.get("/api/freshdesk/search")

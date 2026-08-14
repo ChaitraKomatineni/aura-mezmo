@@ -118,7 +118,29 @@
   .inline-panel .title { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
   .inline-panel .title b { color: var(--text); }
 
-  iframe.embed { flex: 1; width: 100%; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+  /* Skills */
+  .skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 16px; }
+  .skill-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; cursor: pointer;
+  }
+  .skill-card:hover { border-color: var(--accent); }
+  .skill-card .name { font-weight: 600; margin-bottom: 6px; }
+  .skill-card .desc {
+    color: var(--muted); font-size: 13px; line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .skill-card.builtin .name::after {
+    content: "built-in"; margin-left: 8px; font-size: 10px; font-weight: 400;
+    color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 6px;
+  }
+  textarea.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .restart-banner {
+    display: none; background: var(--accent-dim); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px;
+  }
+  .restart-banner.show { display: block; }
+  .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; }
 </style>
 </head>
 <body>
@@ -129,7 +151,7 @@
   <button data-tab="upload">Upload Logs</button>
   <button data-tab="live">Live Logs</button>
   <button data-tab="freshdesk">Freshdesk Bugs</button>
-  <button data-tab="domo">Domo</button>
+  <button data-tab="skills">Skills</button>
 </nav>
 
 <main>
@@ -277,19 +299,41 @@
     </div>
   </section>
 
-  <!-- DOMO -->
-  <section class="panel" id="panel-domo">
-    <h2>Domo Dashboard</h2>
-    <div class="hint">Display-only embed &mdash; nothing here flows through Aura. Paste an embed URL from a Domo Card/Page's Share &gt; Embed option, or set <code>DOMO_EMBED_URL</code> in <code>.env</code>.</div>
-    <div class="row">
-      <div class="field" style="flex:3;">
-        <input id="domo-url" placeholder="https://public.domo.com/embed/..." />
-      </div>
-      <div class="field" style="flex:1; display:flex; align-items:flex-start;">
-        <button class="primary" id="domo-load" style="width:100%;">Load</button>
+  <!-- SKILLS -->
+  <section class="panel" id="panel-skills">
+    <h2>Skills</h2>
+    <div class="hint">
+      Skills are reusable know-how packs Aura loads on demand &mdash; the same mechanism behind the built-in <code>robot-shift-notes</code> skill. Write one for any repeatable question you keep asking (a keyword glossary, a checklist, an output format) and Aura will reach for it automatically when it's relevant. No code editing required.
+    </div>
+    <div id="skills-banner" class="restart-banner"></div>
+    <div class="row" style="align-items:flex-end;">
+      <div class="field" style="flex:1;"></div>
+      <div class="field" style="flex:0 0 auto;">
+        <button class="primary" id="skill-new">+ New skill</button>
       </div>
     </div>
-    <iframe class="embed" id="domo-frame" style="display:none;"></iframe>
+    <div id="skills-list" class="skill-grid"></div>
+
+    <div class="inline-panel" id="skill-form-panel">
+      <div class="title" id="skill-form-title"><b>New skill</b></div>
+      <div class="field">
+        <label>Name <span class="hint" style="margin:0; display:inline;">(lowercase letters, numbers, hyphens only — this becomes the folder name, can't be changed later)</span></label>
+        <input id="skill-name" placeholder="e.g. e-stop-triage" />
+      </div>
+      <div class="field">
+        <label>Description <span id="skill-desc-count" class="hint" style="margin:0; display:inline;"></span></label>
+        <textarea id="skill-description" rows="2" maxlength="1024" placeholder="One or two sentences: what this skill does AND when Aura should reach for it. This is what Aura sees at all times, so be specific — e.g. 'Use when asked to triage an e-stop event: which subsystem tripped it and whether it was operator- or system-triggered.'"></textarea>
+      </div>
+      <div class="field">
+        <label>Instructions (Markdown)</label>
+        <textarea id="skill-body" rows="16" class="mono" placeholder="Write the actual instructions here: what to search for, how to interpret it, what format to answer in. Plain Markdown — headings, lists, examples all work."></textarea>
+      </div>
+      <button class="primary" id="skill-save">Save skill</button>
+      <button class="small-btn" id="skill-test">Try it in chat</button>
+      <button class="small-btn" id="skill-delete" style="display:none; border-color:var(--danger); color:var(--danger);">Delete</button>
+      <button class="small-btn" id="skill-cancel">Cancel</button>
+      <div id="skill-form-error" class="error"></div>
+    </div>
   </section>
 
 </main>
@@ -672,40 +716,170 @@ document.getElementById('fd-filter-run').addEventListener('click', () => {
   fdFilterPanel.classList.remove('open');
 });
 
-// ---------- Domo ----------
-const domoUrlInput = document.getElementById('domo-url');
-const domoFrame = document.getElementById('domo-frame');
+// ---------- Skills ----------
+const skillsList = document.getElementById('skills-list');
+const skillsBanner = document.getElementById('skills-banner');
+const skillFormPanel = document.getElementById('skill-form-panel');
+const skillFormTitle = document.getElementById('skill-form-title');
+const skillNameInput = document.getElementById('skill-name');
+const skillDescInput = document.getElementById('skill-description');
+const skillDescCount = document.getElementById('skill-desc-count');
+const skillBodyInput = document.getElementById('skill-body');
+const skillFormError = document.getElementById('skill-form-error');
+const skillDeleteBtn = document.getElementById('skill-delete');
 
-function loadDomo(url) {
-  if (!url) return;
-  domoFrame.src = url;
-  domoFrame.style.display = 'block';
-  localStorage.setItem('domoEmbedUrl', url);
+const SKILL_BODY_TEMPLATE =
+`## When to use this
+
+Describe the trigger: what kind of question should make Aura reach for this skill.
+
+## What to do
+
+1. Which tool(s) to call and what to search for.
+2. How to interpret the results.
+3. Anything to explicitly avoid guessing (dates, counts, IDs) — say to look them up instead.
+
+## Output format
+
+Show the exact shape the answer should take (a template, a table, a checklist).
+`;
+
+function showSkillsBanner(msg) {
+  skillsBanner.textContent = msg;
+  skillsBanner.classList.add('show');
 }
 
-document.getElementById('domo-load').addEventListener('click', () => {
-  loadDomo(domoUrlInput.value.trim());
-});
-domoUrlInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') loadDomo(domoUrlInput.value.trim());
-});
-
-(async function initDomo() {
-  const saved = localStorage.getItem('domoEmbedUrl');
-  if (saved) {
-    domoUrlInput.value = saved;
-    loadDomo(saved);
+async function loadSkills() {
+  const resp = await fetch('/api/skills');
+  const data = await resp.json();
+  skillsList.innerHTML = '';
+  if (!data.skills || !data.skills.length) {
+    skillsList.innerHTML = '<div class="empty-state">No skills yet — click "+ New skill" to write one.</div>';
     return;
   }
+  for (const s of data.skills) {
+    const card = document.createElement('div');
+    card.className = 'skill-card' + (s.name === 'robot-shift-notes' ? ' builtin' : '');
+    card.innerHTML =
+      '<div class="name">' + s.name + '</div>' +
+      '<div class="desc">' + (s.description || '') + '</div>';
+    card.addEventListener('click', () => openEditSkill(s.name));
+    skillsList.appendChild(card);
+  }
+}
+
+function updateDescCount() {
+  skillDescCount.textContent = skillDescInput.value.length + ' / 1024';
+}
+skillDescInput.addEventListener('input', updateDescCount);
+
+function openNewSkill() {
+  skillFormTitle.innerHTML = '<b>New skill</b>';
+  skillFormPanel.dataset.mode = 'create';
+  skillFormPanel.dataset.originalName = '';
+  skillNameInput.value = '';
+  skillNameInput.disabled = false;
+  skillDescInput.value = '';
+  skillBodyInput.value = SKILL_BODY_TEMPLATE;
+  skillFormError.textContent = '';
+  skillDeleteBtn.style.display = 'none';
+  updateDescCount();
+  skillFormPanel.classList.add('open');
+  skillNameInput.focus();
+}
+
+async function openEditSkill(name) {
+  const resp = await fetch('/api/skills/' + encodeURIComponent(name));
+  const s = await resp.json();
+  if (s.detail) {
+    showSkillsBanner('Could not load "' + name + '": ' + s.detail);
+    return;
+  }
+  skillFormTitle.innerHTML = 'Editing <b>' + name + '</b>';
+  skillFormPanel.dataset.mode = 'edit';
+  skillFormPanel.dataset.originalName = name;
+  skillNameInput.value = name;
+  skillNameInput.disabled = true; // renaming = new folder in Aura's eyes; keep it simple
+  skillDescInput.value = s.description || '';
+  skillBodyInput.value = s.body || '';
+  skillFormError.textContent = '';
+  skillDeleteBtn.style.display = 'inline-block';
+  updateDescCount();
+  skillFormPanel.classList.add('open');
+}
+
+document.getElementById('skill-new').addEventListener('click', openNewSkill);
+document.getElementById('skill-cancel').addEventListener('click', () => {
+  skillFormPanel.classList.remove('open');
+});
+
+document.getElementById('skill-save').addEventListener('click', async () => {
+  const mode = skillFormPanel.dataset.mode;
+  const name = skillNameInput.value.trim();
+  const description = skillDescInput.value.trim();
+  const body = skillBodyInput.value.trim();
+  skillFormError.textContent = '';
+
+  if (!name || !description || !body) {
+    skillFormError.textContent = 'Name, description, and instructions are all required.';
+    return;
+  }
+  if (mode === 'create' && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) {
+    skillFormError.textContent = 'Name can only use lowercase letters, digits, and single hyphens (e.g. "e-stop-triage").';
+    return;
+  }
+
   try {
-    const resp = await fetch('/api/config');
-    const cfg = await resp.json();
-    if (cfg.domo_embed_url) {
-      domoUrlInput.value = cfg.domo_embed_url;
-      loadDomo(cfg.domo_embed_url);
+    let resp;
+    if (mode === 'create') {
+      resp = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description, body }),
+      });
+    } else {
+      resp = await fetch('/api/skills/' + encodeURIComponent(skillFormPanel.dataset.originalName), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description, body }),
+      });
     }
-  } catch (e) { /* config endpoint optional */ }
-})();
+    const data = await resp.json();
+    if (!resp.ok) {
+      skillFormError.textContent = data.detail || 'Save failed.';
+      return;
+    }
+    skillFormPanel.classList.remove('open');
+    showSkillsBanner(
+      'Saved "' + name + '". It won\'t show up in chat until whoever is hosting this restarts ' +
+      'Aura (`docker compose restart aura`) — Aura only reads skills on startup.'
+    );
+    loadSkills();
+  } catch (e) {
+    skillFormError.textContent = 'Could not reach the server: ' + e;
+  }
+});
+
+document.getElementById('skill-delete').addEventListener('click', async () => {
+  const name = skillFormPanel.dataset.originalName;
+  if (!confirm('Delete skill "' + name + '"? This removes its SKILL.md permanently.')) return;
+  const resp = await fetch('/api/skills/' + encodeURIComponent(name), { method: 'DELETE' });
+  const data = await resp.json();
+  if (!resp.ok) {
+    skillFormError.textContent = data.detail || 'Delete failed.';
+    return;
+  }
+  skillFormPanel.classList.remove('open');
+  showSkillsBanner('Deleted "' + name + '". Restart Aura for the change to take effect there too.');
+  loadSkills();
+});
+
+document.getElementById('skill-test').addEventListener('click', () => {
+  const name = skillNameInput.value.trim() || '(unsaved skill)';
+  sendChat('What skills do you have available, and can you walk me through what "' + name + '" does?');
+});
+
+loadSkills();
 </script>
 </body>
 </html>

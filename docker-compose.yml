@@ -99,8 +99,14 @@ services:
     environment:
       AURA_BASE_URL: "http://aura:8080"
       UPLOAD_DIR: "/data/uploads"
+      SKILLS_DIR: "/app/skills"
     volumes:
       - logs-data:/data/uploads
+      # Read-write, unlike Aura's own read-only mount of the same host
+      # directory below — this is what lets the "Skills" tab create/edit/
+      # delete SKILL.md files. Aura only re-scans this directory at
+      # startup, so changes need `docker compose restart aura` to go live.
+      - ./config/skills:/app/skills
     depends_on:
       aura:
         condition: service_healthy
