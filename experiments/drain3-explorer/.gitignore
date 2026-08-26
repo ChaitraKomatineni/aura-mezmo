@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# Drain3 state snapshots (--persist) and results (--output) are run
+# artifacts, not source -- don't accidentally commit real log content
+# through them.
+*.bin
+*.state
+results*.json
