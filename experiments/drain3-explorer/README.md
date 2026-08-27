@@ -51,6 +51,9 @@ files `logs-mcp` already serves). For JSON-line input it pulls the
 python3 mine_templates.py --input /path/to/your-export.jsonl --top 40
 
 # write the full result set (not just the top N printed to screen) to a file
+# -- each entry includes cluster_id, count, template, apps, levels,
+# first_seen/last_seen (ISO 8601, or null if no line in that cluster had a
+# derivable timestamp), and example raw lines
 python3 mine_templates.py --input /path/to/your-export.jsonl --output results.json
 
 # multiple inputs, or a whole directory
@@ -64,6 +67,41 @@ python3 mine_templates.py --input huge-export.jsonl --limit 5000
 `--persist state.bin` saves Drain3's learned clusters to a file and reloads
 them on the next run, so knowledge accumulates across multiple log batches
 instead of starting from zero each time (see Drain3's persistence feature).
+
+## Reducing what you feed the LLM (`--collapsed-output`)
+
+Drain3 itself is content-only — `LogCluster` has no timestamp field, just
+tokens, an id, and a count. Timestamps matter a lot for this project (shift
+notes need "operator logged out between X and Y"), so this script tracks
+first/last-seen per cluster itself, outside of Drain3: it pulls whichever
+timestamp field a line actually has (`timestamp_iso`, then `timestamp`, then
+Mezmo's own ingestion clock `_ts` as a fallback that's present on
+essentially every line regardless of source app — confirmed 100% coverage,
+20,000/20,000 lines, on the full p16 export). `--collapsed-output` writes
+that out as one line per template, sorted chronologically, instead of the
+full result set:
+
+```bash
+python3 mine_templates.py --input /path/to/your-export.jsonl --collapsed-output collapsed.txt
+```
+
+```
+[2026-08-03T19:08:40Z -> 2026-08-03T19:09:27Z] x3934 (fastloop)  Stop controller with status STOPPED
+[2026-08-03T19:08:45Z -> 2026-08-03T19:09:25Z] x84 (audit)  AVC apparmor "DENIED" operation "ptrace" ...
+[2026-08-03T19:09:04Z] x1 (user@1000.service)  [SINGLE OCCURRENCE]  [temperature-probe] ERROR [Errno <NUM>] No such file or directory ...
+```
+
+On the real p16 exports this ran on: the single-session file collapsed 475
+raw lines into 5 (95x), and the full 20k-line firehose collapsed into 51
+(392x). `[SINGLE OCCURRENCE]` flags count-1 clusters specifically because
+those are the ones worth narrating individually in a shift note, per
+`robot-shift-notes`' own "group routine activity, narrate anomalies" rule —
+this output is close to the raw material that rule already asks for.
+
+One honest limit: this is currently a batch tool, not a running service —
+it discovers first/last-seen and templates only after seeing the whole
+file. Wiring it into `logs-mcp` as a live tool (see below) would need
+streaming updates instead of a single upfront pass.
 
 ## Reading the output
 
