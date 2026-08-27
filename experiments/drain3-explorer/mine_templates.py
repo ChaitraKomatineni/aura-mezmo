@@ -36,6 +36,15 @@ Usage:
     # the actual "reduce what I feed the LLM" use case: collapse repeats
     # into one line per template, with a time range, sorted chronologically
     python3 mine_templates.py --input logs.jsonl --collapsed-output collapsed.txt
+
+    # train once on a representative batch, save the catalog...
+    python3 mine_templates.py --input historical.jsonl --persist catalog.bin
+    # ...then classify new logs against ONLY that catalog: no new clusters
+    # get created and no existing template gets mutated (see Drain3's
+    # training-vs-inference docs). Anything that doesn't match is reported
+    # as "unrecognized" instead of silently becoming a new template --
+    # itself a useful signal (a log shape nothing in training ever saw).
+    python3 mine_templates.py --input new_logs.jsonl --persist catalog.bin --mode infer
 """
 import argparse
 import glob
@@ -51,6 +60,11 @@ from drain3.file_persistence import FilePersistence
 from drain3.template_miner_config import TemplateMinerConfig
 
 HERE = Path(__file__).resolve().parent
+
+# Sentinel cluster id for inference-mode lines that matched nothing in the
+# trained catalog. Real Drain3 cluster ids start at 1, so this can't collide.
+UNRECOGNIZED_ID = -1
+UNRECOGNIZED_TEMPLATE = "(unrecognized -- no match in the trained catalog)"
 
 
 def iter_lines(input_patterns):
@@ -202,6 +216,13 @@ def main():
         "--persist", default=None,
         help="Optional file to save/load learned clusters across runs (accumulate knowledge over time)",
     )
+    parser.add_argument(
+        "--mode", choices=["train", "infer"], default="train",
+        help="train (default): add_log_message() -- may create new clusters or generalize "
+             "existing templates. infer: match() against an existing --persist catalog only "
+             "-- never creates or modifies clusters; anything that doesn't match is reported "
+             "as unrecognized rather than silently learned.",
+    )
     parser.add_argument("--output", default=None, help="Optional path to write full results as JSON")
     parser.add_argument(
         "--collapsed-output", default=None,
@@ -221,23 +242,35 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.mode == "infer" and not (args.persist and Path(args.persist).exists()):
+        parser.error(
+            "--mode infer requires --persist pointing at an existing trained catalog "
+            "(run --mode train with --persist first)."
+        )
+
     miner = build_template_miner(args.config, args.persist)
 
-    # cluster_id -> {"examples": [...], "apps": {...}, "levels": {...},
+    # cluster_id -> {"count": int, "examples": [...], "apps": {...}, "levels": {...},
     #                 "first_seen": epoch_seconds | None, "last_seen": ...,
     #                 "all_timestamps": [...] (capped at full_timestamps_below + 1
     #                 while accumulating, so a high-count cluster doesn't waste
     #                 memory holding thousands of timestamps it'll never show)}
+    #
+    # "count" is tracked here (not read off cluster.size) because in infer
+    # mode match() never touches cluster.size at all -- it's frozen at
+    # whatever it was when the catalog was trained. This run's own counts
+    # only exist in clusters_meta.
     cap = args.full_timestamps_below
     clusters_meta = defaultdict(
         lambda: {
-            "examples": [], "apps": set(), "levels": set(),
+            "count": 0, "examples": [], "apps": set(), "levels": set(),
             "first_seen": None, "last_seen": None, "all_timestamps": [],
         }
     )
     files_seen = set()
     total = 0
     timestamped = 0
+    unrecognized = 0
     start = time.time()
 
     for f, _line_no, raw_line in iter_lines(args.input):
@@ -245,10 +278,21 @@ def main():
             break
         files_seen.add(str(f))
         text, meta = extract_text(raw_line, args.field, args.line_field)
-        result = miner.add_log_message(text)
         total += 1
 
-        cm = clusters_meta[result["cluster_id"]]
+        if args.mode == "train":
+            result = miner.add_log_message(text)
+            cid = result["cluster_id"]
+        else:
+            matched = miner.match(text)
+            if matched is None:
+                cid = UNRECOGNIZED_ID
+                unrecognized += 1
+            else:
+                cid = matched.cluster_id
+
+        cm = clusters_meta[cid]
+        cm["count"] += 1
         if len(cm["examples"]) < args.examples:
             cm["examples"].append(text)
         if meta.get("app"):
@@ -266,32 +310,55 @@ def main():
                 cm["all_timestamps"].append(ts)
 
     elapsed = time.time() - start
-    clusters = sorted(miner.drain.clusters, key=lambda c: c.size, reverse=True)
 
-    print(f"\nProcessed {total} lines from {len(files_seen)} file(s) in {elapsed:.2f}s")
-    print(f"Found {len(clusters)} distinct templates ({timestamped}/{total} lines had a usable timestamp)\n")
+    # (cluster_id, template, count) rows -- the shape every report below
+    # consumes, whichever mode produced them.
+    if args.mode == "train":
+        rows = sorted(
+            ((c.cluster_id, c.get_template(), c.size) for c in miner.drain.clusters),
+            key=lambda r: r[2], reverse=True,
+        )
+    else:
+        template_lookup = {c.cluster_id: c.get_template() for c in miner.drain.clusters}
+        template_lookup[UNRECOGNIZED_ID] = UNRECOGNIZED_TEMPLATE
+        rows = sorted(
+            ((cid, template_lookup.get(cid, f"(unknown cluster {cid})"), m["count"])
+             for cid, m in clusters_meta.items()),
+            key=lambda r: r[2], reverse=True,
+        )
+
+    print(f"\nProcessed {total} lines from {len(files_seen)} file(s) in {elapsed:.2f}s [{args.mode} mode]")
+    if args.mode == "train":
+        print(f"Found {len(rows)} distinct templates ({timestamped}/{total} lines had a usable timestamp)\n")
+    else:
+        print(
+            f"Matched against {len(miner.drain.clusters)} trained templates; "
+            f"{unrecognized}/{total} lines ({unrecognized / max(total, 1):.1%}) matched none of them "
+            f"({timestamped}/{total} lines had a usable timestamp)\n"
+        )
 
     header = f"{'COUNT':>7}  {'ID':>4}  {'APPS':<20}  TEMPLATE"
     print(header)
     print("-" * len(header))
-    for cluster in clusters[: args.top]:
-        meta = clusters_meta.get(cluster.cluster_id, {"apps": set(), "levels": set()})
+    for cid, template, count in rows[: args.top]:
+        meta = clusters_meta.get(cid, {"apps": set(), "levels": set()})
         apps = ",".join(sorted(meta["apps"])) or "-"
-        print(f"{cluster.size:>7}  {cluster.cluster_id:>4}  {apps:<20}  {cluster.get_template()}")
+        print(f"{count:>7}  {cid:>4}  {apps:<20}  {template}")
 
-    if len(clusters) > args.top:
-        print(f"\n... and {len(clusters) - args.top} more (raise --top to see them)")
+    if len(rows) > args.top:
+        print(f"\n... and {len(rows) - args.top} more (raise --top to see them)")
 
     if args.output:
         full_results = []
-        for cluster in clusters:
-            meta = clusters_meta.get(cluster.cluster_id, {"examples": [], "apps": set(), "levels": set()})
-            has_full = cluster.size <= cap
+        for cid, template, count in rows:
+            meta = clusters_meta.get(cid, {"examples": [], "apps": set(), "levels": set()})
+            has_full = count <= cap
             full_results.append(
                 {
-                    "cluster_id": cluster.cluster_id,
-                    "count": cluster.size,
-                    "template": cluster.get_template(),
+                    "cluster_id": cid,
+                    "count": count,
+                    "template": template,
+                    "unrecognized": cid == UNRECOGNIZED_ID,
                     "apps": sorted(meta["apps"]),
                     "levels": sorted(meta["levels"]),
                     "first_seen": iso(meta.get("first_seen")),
@@ -314,13 +381,13 @@ def main():
         # timeline an LLM can follow, not a leaderboard. Clusters with no
         # derivable timestamp sort last rather than crashing the sort.
         ordered = sorted(
-            clusters,
-            key=lambda c: clusters_meta.get(c.cluster_id, {}).get("first_seen") or float("inf"),
+            rows,
+            key=lambda r: clusters_meta.get(r[0], {}).get("first_seen") or float("inf"),
         )
         out_lines = []
-        for cluster in ordered:
-            meta = clusters_meta.get(cluster.cluster_id, {})
-            if cluster.size <= cap and meta.get("all_timestamps"):
+        for cid, template, count in ordered:
+            meta = clusters_meta.get(cid, {})
+            if count <= cap and meta.get("all_timestamps"):
                 # Low-count: show every occurrence, not just the endpoints --
                 # a gap between occurrence 2 and 3 of 3 is exactly the kind of
                 # thing a first/last range would silently erase.
@@ -334,8 +401,8 @@ def main():
             # in a Mezmo export have no "level" field at all, so "-" here is
             # an honest "no severity reported", not a missing-data bug.
             levels = ",".join(sorted(meta.get("levels", set()))) or "-"
-            flag = "  [SINGLE OCCURRENCE]" if cluster.size == 1 else ""
-            out_lines.append(f"[{when}] x{cluster.size} ({apps}) [{levels}]{flag}  {cluster.get_template()}")
+            flag = "  [SINGLE OCCURRENCE]" if count == 1 else ""
+            out_lines.append(f"[{when}] x{count} ({apps}) [{levels}]{flag}  {template}")
         Path(args.collapsed_output).write_text("\n".join(out_lines) + "\n", encoding="utf-8")
         print(
             f"\nWrote collapsed transcript to {args.collapsed_output}: "

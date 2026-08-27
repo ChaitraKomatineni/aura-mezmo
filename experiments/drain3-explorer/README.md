@@ -140,6 +140,53 @@ firehose but the ones actually worth that kind of drill-down are rare --
 so most of the time nothing needs it, and when something does, the lookup
 targets one template instead of scanning the whole file.
 
+## Training vs. inference mode (`--mode`)
+
+Everything above runs in Drain3's *training* mode (`add_log_message()`):
+every line can create a new cluster or generalize an existing template.
+That's the right mode for a one-off exploratory pass, but it means the
+template catalog can drift a little between runs and every genuinely novel
+line just quietly becomes cluster #200 with no signal that it was novel.
+
+Drain3 also has an [inference mode](https://github.com/logpai/Drain3#training-vs-inference-modes)
+(`match()`): given an already-trained catalog, it classifies new lines
+against it *without ever creating or modifying a cluster*. A line that
+doesn't match anything comes back `None` instead of silently becoming a
+new template.
+
+```bash
+# train once on a representative batch, save the catalog
+python3 mine_templates.py --input historical.jsonl --persist catalog.bin
+
+# classify new logs against ONLY that catalog -- read-only, nothing learned
+python3 mine_templates.py --input new_logs.jsonl --persist catalog.bin --mode infer
+```
+
+`--mode infer` requires an existing `--persist` file (it errors otherwise --
+there's nothing to classify against). Unmatched lines are reported as a
+single `(unrecognized -- no match in the trained catalog)` pseudo-cluster
+(`cluster_id -1`) rather than being dropped or silently learned, and get
+their own `apps`/count/timestamps like any other row.
+
+Tried this for real: trained a catalog on the p16 export (gen1-prod16, 51
+templates), then ran it in `--mode infer` against the entirely separate
+p22 export (gen1-prod22 -- a different robot). 97.3% of p22's 20,000 lines
+(19,455) matched a template the p16 catalog had never seen anything from
+that robot to learn -- `fastloop`, `audit`, `kernel`, `temperature-probe`,
+`talker`, `system_health` all matched cleanly. The remaining 2.7% (545
+lines) came from a mix of apps p16 never had at all (`echoer`,
+`miru.service`, `scan_perception`, `ssh.service`) and apps present in both
+robots but with message content p16's catalog had never seen (some
+`pickle_rosbridge`/`tailscaled.service`/`logdna-agent.service` variants) --
+`match()` requires a perfect match (`sim_th=1.0` internally, stricter than
+training's `sim_th`), so it won't stretch an existing template to cover a
+merely-similar new variant the way training would.
+
+That 545-line breakdown is itself a genuinely useful anomaly signal for a
+fleet with more than one robot: "recognized against a shared baseline" vs.
+"never seen before, from any robot in training" is a distinction plain
+frequency counting doesn't give you.
+
 ## Reading the output
 
 ```
