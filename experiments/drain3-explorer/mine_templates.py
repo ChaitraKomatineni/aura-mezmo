@@ -212,14 +212,28 @@ def main():
     parser.add_argument("--top", type=int, default=25, help="How many clusters to print (default 25)")
     parser.add_argument("--examples", type=int, default=2, help="Example raw lines to keep per cluster")
     parser.add_argument("--limit", type=int, default=None, help="Stop after N lines (quick test runs)")
+    parser.add_argument(
+        "--full-timestamps-below", type=int, default=10,
+        help="For clusters with this many occurrences or fewer, keep every occurrence's "
+             "timestamp instead of collapsing to just first/last (default 10). Above this "
+             "count, only first_seen/last_seen are kept -- a middle occurrence 3 of 3 is "
+             "worth seeing exactly; occurrence 1,847 of 3,934 is not.",
+    )
     args = parser.parse_args()
 
     miner = build_template_miner(args.config, args.persist)
 
     # cluster_id -> {"examples": [...], "apps": {...}, "levels": {...},
-    #                 "first_seen": epoch_seconds | None, "last_seen": ...}
+    #                 "first_seen": epoch_seconds | None, "last_seen": ...,
+    #                 "all_timestamps": [...] (capped at full_timestamps_below + 1
+    #                 while accumulating, so a high-count cluster doesn't waste
+    #                 memory holding thousands of timestamps it'll never show)}
+    cap = args.full_timestamps_below
     clusters_meta = defaultdict(
-        lambda: {"examples": [], "apps": set(), "levels": set(), "first_seen": None, "last_seen": None}
+        lambda: {
+            "examples": [], "apps": set(), "levels": set(),
+            "first_seen": None, "last_seen": None, "all_timestamps": [],
+        }
     )
     files_seen = set()
     total = 0
@@ -248,6 +262,8 @@ def main():
                 cm["first_seen"] = ts
             if cm["last_seen"] is None or ts > cm["last_seen"]:
                 cm["last_seen"] = ts
+            if len(cm["all_timestamps"]) <= cap:
+                cm["all_timestamps"].append(ts)
 
     elapsed = time.time() - start
     clusters = sorted(miner.drain.clusters, key=lambda c: c.size, reverse=True)
@@ -270,6 +286,7 @@ def main():
         full_results = []
         for cluster in clusters:
             meta = clusters_meta.get(cluster.cluster_id, {"examples": [], "apps": set(), "levels": set()})
+            has_full = cluster.size <= cap
             full_results.append(
                 {
                     "cluster_id": cluster.cluster_id,
@@ -279,6 +296,13 @@ def main():
                     "levels": sorted(meta["levels"]),
                     "first_seen": iso(meta.get("first_seen")),
                     "last_seen": iso(meta.get("last_seen")),
+                    # Every occurrence's timestamp, but only when the count is
+                    # low enough that "every occurrence" is a short list --
+                    # null (not a lossy partial list) once a cluster grows
+                    # past --full-timestamps-below.
+                    "all_timestamps": (
+                        [iso(t) for t in sorted(meta.get("all_timestamps", []))] if has_full else None
+                    ),
                     "examples": meta["examples"],
                 }
             )
@@ -296,11 +320,15 @@ def main():
         out_lines = []
         for cluster in ordered:
             meta = clusters_meta.get(cluster.cluster_id, {})
-            first, last = iso(meta.get("first_seen")), iso(meta.get("last_seen"))
-            if first and last and first != last:
-                when = f"{first} -> {last}"
+            if cluster.size <= cap and meta.get("all_timestamps"):
+                # Low-count: show every occurrence, not just the endpoints --
+                # a gap between occurrence 2 and 3 of 3 is exactly the kind of
+                # thing a first/last range would silently erase.
+                stamps = [iso(t) for t in sorted(meta["all_timestamps"])]
+                when = ", ".join(stamps)
             else:
-                when = first or "no timestamp"
+                first, last = iso(meta.get("first_seen")), iso(meta.get("last_seen"))
+                when = f"{first} -> {last}" if (first and last and first != last) else (first or "no timestamp")
             apps = ",".join(sorted(meta.get("apps", set()))) or "-"
             # Not every source tags severity -- audit/kernel/tailscaled lines
             # in a Mezmo export have no "level" field at all, so "-" here is

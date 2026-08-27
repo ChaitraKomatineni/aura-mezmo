@@ -111,6 +111,35 @@ it discovers first/last-seen and templates only after seeing the whole
 file. Wiring it into `logs-mcp` as a live tool (see below) would need
 streaming updates instead of a single upfront pass.
 
+### Low-count clusters show every occurrence, not just first/last
+
+Collapsing to first/last-seen is fine for a cluster that fired 3,934 times —
+nobody needs all 3,934 timestamps. It's a real information loss for a
+cluster that fired 3 times, where "first -> last" silently erases the
+middle one and implies an even, unremarkable spread that might not be true.
+Real example from the p16 export: a `"Node (...) differs by translation..."`
+template with 3 occurrences turned out to be `19:08:50Z, 19:09:09Z,
+19:09:09Z` -- one early hit, then two simultaneous ones 19 seconds later --
+which a `19:08:50Z -> 19:09:09Z` range would have made look like a smooth,
+unremarkable gap instead of a burst pattern.
+
+So `--full-timestamps-below N` (default 10) keeps *every* occurrence's
+timestamp for any cluster at or below that count, in both `--output` and
+`--collapsed-output`; only clusters above it collapse to a first/last
+range. Both `--output`'s `all_timestamps` field and `--collapsed-output`'s
+bracketed list use this — a cluster over the threshold gets `null` /
+`first -> last` rather than a silently truncated partial list.
+
+For clusters that *do* stay collapsed to a range (the genuinely
+high-volume ones), the `examples` field this tool already writes is the
+bridge back to precision when it's actually needed: it's real, literal
+text from that template, which Aura can hand straight to `logs_search_logs`
+to pull every exact occurrence with full timestamps on demand. That search
+is cheap specifically *because* these clusters are high-count in the raw
+firehose but the ones actually worth that kind of drill-down are rare --
+so most of the time nothing needs it, and when something does, the lookup
+targets one template instead of scanning the whole file.
+
 ## Reading the output
 
 ```
