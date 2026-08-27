@@ -187,6 +187,50 @@ fleet with more than one robot: "recognized against a shared baseline" vs.
 "never seen before, from any robot in training" is a distinction plain
 frequency counting doesn't give you.
 
+## Clustering per app (`--by-app`)
+
+By default every line from every app goes into one shared Drain3 tree, so
+a high-volume app can dominate the tree-routing and similarity decisions
+that a low-volume app's lines also have to go through. On a real 20k-line
+p22 export, pooling everything gave `fastloop` (17,149 of 20,000 lines --
+85%) most of the shared tree, while `api-server` (16 lines) or `taskloop`
+(112 lines) got whatever templates fell out of that. `--by-app` runs an
+entirely separate Drain3 instance per app instead -- its own tree, its own
+clusters, judged only against that app's own lines:
+
+```bash
+python3 mine_templates.py --input export.jsonl --by-app --output results.json --collapsed-output collapsed.txt
+```
+
+Console output gets one indented section per app, largest first:
+
+```
+== fastloop ==
+17149 lines -> 9 distinct templates (17149/17149 had a usable timestamp)
+  ...
+== api-server ==
+16 lines -> 6 distinct templates (16/16 had a usable timestamp)
+    COUNT    ID  APPS                  TEMPLATE
+     10     1  api-server            Sending <*>
+      2     3  api-server            POST/OPTIONS on /api/ui_event took <*> to respond
+```
+
+`--output` writes one JSON object keyed by app name (instead of one flat
+list), and `--collapsed-output` writes `== app ==` header lines between
+each app's block. Lines with no `app` field land in an `(unknown app)`
+group rather than being dropped.
+
+**When to reach for this**: if you suspect a low-volume app's events are
+getting merged into overly-generic templates, or you want a report
+organized by which service to go look at rather than by raw frequency.
+**When not to**: if you want cross-app frequency ranking (e.g. "what's
+the single most common thing happening across the whole robot"), pooled
+mode already sorts everything together for that.
+
+**v1 limit**: not combinable with `--mode infer` or `--persist` yet --
+each app would need its own saved catalog file, which isn't built. Use
+pooled mode for train-once/infer-later workflows for now.
+
 ## Reading the output
 
 ```
@@ -239,6 +283,15 @@ finished config — read them alongside a real run's output and adjust:
 - `extract_parameters()` (see Drain3's docs) to pull structured values —
   session IDs, counts — straight out of matched lines, rather than the
   skill instructing the LLM to eyeball a raw string for them.
+- A structured-sidecar-field extractor. Not every useful field is in the
+  free text Drain3 clusters at all — e.g. `taskloop`'s "Persist dataclass"
+  lines carry a `persisted` JSON object (sibling to `message`, not nested
+  in it) with the real session package-pick statistics
+  (`packages_succeeded`, `packages_failed`, `package_failure_counts`,
+  `session_id`, `time_in_session`, ...). Drain3 template-mining never sees
+  this field, so no `sim_th`/`depth` tuning will surface it — it needs a
+  separate `--sidecar-field persisted` style pass that pulls and reports
+  those values directly instead of templating them as text.
 
 None of this is wired up — this folder is deliberately just the
 "what does the output look like" step before deciding if/how to build any

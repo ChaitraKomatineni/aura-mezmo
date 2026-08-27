@@ -45,6 +45,12 @@ Usage:
     # as "unrecognized" instead of silently becoming a new template --
     # itself a useful signal (a log shape nothing in training ever saw).
     python3 mine_templates.py --input new_logs.jsonl --persist catalog.bin --mode infer
+
+    # cluster each app's lines in its own Drain3 tree instead of one shared
+    # pool -- keeps a high-volume app (fastloop) from dominating a
+    # low-volume app's (api-server) templates. Not combinable with
+    # --mode infer / --persist yet.
+    python3 mine_templates.py --input export.jsonl --by-app --collapsed-output collapsed.txt
 """
 import argparse
 import glob
@@ -194,6 +200,137 @@ def build_template_miner(config_path, persist_path):
     return TemplateMiner(persistence_handler=persistence, config=config)
 
 
+def new_clusters_meta():
+    return {
+        "count": 0, "examples": [], "apps": set(), "levels": set(),
+        "first_seen": None, "last_seen": None, "all_timestamps": [],
+    }
+
+
+def cluster_group(text_meta_pairs, mode, examples_cap, ts_cap, config_path, persist_path):
+    """Run one independent Drain3 pass (its own tree, its own catalog) over
+    one group of (text, meta) pairs -- either "everything" or one app's
+    lines, depending on how the caller partitioned things. Returns
+    (rows, clusters_meta, total, timestamped, unrecognized), where rows is
+    a list of (cluster_id, template, count) sorted by count descending.
+    """
+    miner = build_template_miner(config_path, persist_path)
+    clusters_meta = defaultdict(new_clusters_meta)
+    total = timestamped = unrecognized = 0
+
+    for text, meta in text_meta_pairs:
+        total += 1
+        if mode == "train":
+            result = miner.add_log_message(text)
+            cid = result["cluster_id"]
+        else:
+            matched = miner.match(text)
+            if matched is None:
+                cid = UNRECOGNIZED_ID
+                unrecognized += 1
+            else:
+                cid = matched.cluster_id
+
+        cm = clusters_meta[cid]
+        cm["count"] += 1
+        if len(cm["examples"]) < examples_cap:
+            cm["examples"].append(text)
+        if meta.get("app"):
+            cm["apps"].add(meta["app"])
+        if meta.get("level"):
+            cm["levels"].add(meta["level"])
+        ts = meta.get("timestamp")
+        if ts is not None:
+            timestamped += 1
+            if cm["first_seen"] is None or ts < cm["first_seen"]:
+                cm["first_seen"] = ts
+            if cm["last_seen"] is None or ts > cm["last_seen"]:
+                cm["last_seen"] = ts
+            if len(cm["all_timestamps"]) <= ts_cap:
+                cm["all_timestamps"].append(ts)
+
+    if mode == "train":
+        rows = sorted(
+            ((c.cluster_id, c.get_template(), c.size) for c in miner.drain.clusters),
+            key=lambda r: r[2], reverse=True,
+        )
+    else:
+        template_lookup = {c.cluster_id: c.get_template() for c in miner.drain.clusters}
+        template_lookup[UNRECOGNIZED_ID] = UNRECOGNIZED_TEMPLATE
+        rows = sorted(
+            ((cid, template_lookup.get(cid, f"(unknown cluster {cid})"), m["count"])
+             for cid, m in clusters_meta.items()),
+            key=lambda r: r[2], reverse=True,
+        )
+    return rows, clusters_meta, total, timestamped, unrecognized
+
+
+def render_report(label, rows, clusters_meta, total, timestamped, unrecognized, mode, top, cap, indent=""):
+    """Print one group's table to stdout. `label` is a header line (the
+    app name in --by-app mode, or a generic description otherwise)."""
+    print(f"\n{indent}== {label} ==")
+    if mode == "train":
+        print(f"{indent}{total} lines -> {len(rows)} distinct templates "
+              f"({timestamped}/{total} had a usable timestamp)")
+    else:
+        pct = unrecognized / max(total, 1)
+        print(f"{indent}{total} lines matched against a trained catalog; "
+              f"{unrecognized} ({pct:.1%}) matched nothing")
+    header = f"{indent}{'COUNT':>7}  {'ID':>4}  {'APPS':<20}  TEMPLATE"
+    print(header)
+    print(indent + "-" * (len(header) - len(indent)))
+    for cid, template, count in rows[:top]:
+        meta = clusters_meta.get(cid, {"apps": set()})
+        apps = ",".join(sorted(meta["apps"])) or "-"
+        print(f"{indent}{count:>7}  {cid:>4}  {apps:<20}  {template}")
+    if len(rows) > top:
+        print(f"{indent}... and {len(rows) - top} more (raise --top to see them)")
+
+
+def build_output_rows(rows, clusters_meta, cap):
+    """(cluster_id, template, count) rows -> the dicts --output writes."""
+    out = []
+    for cid, template, count in rows:
+        meta = clusters_meta.get(cid, {"examples": [], "apps": set(), "levels": set()})
+        has_full = count <= cap
+        out.append(
+            {
+                "cluster_id": cid,
+                "count": count,
+                "template": template,
+                "unrecognized": cid == UNRECOGNIZED_ID,
+                "apps": sorted(meta["apps"]),
+                "levels": sorted(meta["levels"]),
+                "first_seen": iso(meta.get("first_seen")),
+                "last_seen": iso(meta.get("last_seen")),
+                "all_timestamps": (
+                    [iso(t) for t in sorted(meta.get("all_timestamps", []))] if has_full else None
+                ),
+                "examples": meta["examples"],
+            }
+        )
+    return out
+
+
+def build_collapsed_lines(rows, clusters_meta, cap):
+    """(cluster_id, template, count) rows -> the bracketed text lines
+    --collapsed-output writes, chronologically sorted."""
+    ordered = sorted(rows, key=lambda r: clusters_meta.get(r[0], {}).get("first_seen") or float("inf"))
+    lines = []
+    for cid, template, count in ordered:
+        meta = clusters_meta.get(cid, {})
+        if count <= cap and meta.get("all_timestamps"):
+            when = ", ".join(iso(t) for t in sorted(meta["all_timestamps"]))
+        else:
+            first, last = iso(meta.get("first_seen")), iso(meta.get("last_seen"))
+            when = f"{first} -> {last}" if (first and last and first != last) else (first or "no timestamp")
+        apps = ",".join(sorted(meta.get("apps", set()))) or "-"
+        levels = ",".join(sorted(meta.get("levels", set()))) or "-"
+        flag = "  [SINGLE OCCURRENCE]" if count == 1 else ""
+        lines.append(f"[{when}] x{count} ({apps}) [{levels}]{flag}  {template}")
+    return lines
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -240,6 +377,15 @@ def main():
              "count, only first_seen/last_seen are kept -- a middle occurrence 3 of 3 is "
              "worth seeing exactly; occurrence 1,847 of 3,934 is not.",
     )
+    parser.add_argument(
+        "--by-app", action="store_true",
+        help="Cluster each app's lines separately instead of pooling everything into one "
+             "Drain3 tree. Prevents a high-volume app (e.g. fastloop) from dominating "
+             "sim_th-driven merging decisions for a low-volume app's lines (e.g. api-server), "
+             "and reports/writes results as one section per app, largest first. v1 limit: "
+             "not combinable with --mode infer or --persist (per-app catalogs aren't "
+             "supported yet).",
+    )
     args = parser.parse_args()
 
     if args.mode == "infer" and not (args.persist and Path(args.persist).exists()):
@@ -247,167 +393,100 @@ def main():
             "--mode infer requires --persist pointing at an existing trained catalog "
             "(run --mode train with --persist first)."
         )
+    if args.by_app and (args.mode == "infer" or args.persist):
+        parser.error(
+            "--by-app can't be combined with --mode infer or --persist yet -- each app "
+            "would need its own saved catalog, which isn't supported in this version."
+        )
 
-    miner = build_template_miner(args.config, args.persist)
-
-    # cluster_id -> {"count": int, "examples": [...], "apps": {...}, "levels": {...},
-    #                 "first_seen": epoch_seconds | None, "last_seen": ...,
-    #                 "all_timestamps": [...] (capped at full_timestamps_below + 1
-    #                 while accumulating, so a high-count cluster doesn't waste
-    #                 memory holding thousands of timestamps it'll never show)}
-    #
-    # "count" is tracked here (not read off cluster.size) because in infer
-    # mode match() never touches cluster.size at all -- it's frozen at
-    # whatever it was when the catalog was trained. This run's own counts
-    # only exist in clusters_meta.
     cap = args.full_timestamps_below
-    clusters_meta = defaultdict(
-        lambda: {
-            "count": 0, "examples": [], "apps": set(), "levels": set(),
-            "first_seen": None, "last_seen": None, "all_timestamps": [],
-        }
-    )
     files_seen = set()
     total = 0
-    timestamped = 0
-    unrecognized = 0
-    start = time.time()
+    items = []  # [(text, meta), ...] materialized once, grouped below
 
     for f, _line_no, raw_line in iter_lines(args.input):
         if args.limit and total >= args.limit:
             break
         files_seen.add(str(f))
         text, meta = extract_text(raw_line, args.field, args.line_field)
+        items.append((text, meta))
         total += 1
 
-        if args.mode == "train":
-            result = miner.add_log_message(text)
-            cid = result["cluster_id"]
-        else:
-            matched = miner.match(text)
-            if matched is None:
-                cid = UNRECOGNIZED_ID
-                unrecognized += 1
-            else:
-                cid = matched.cluster_id
+    start = time.time()
+    if args.by_app:
+        groups = defaultdict(list)
+        for text, meta in items:
+            groups[meta.get("app") or "(unknown app)"].append((text, meta))
+        group_order = sorted(groups, key=lambda app: len(groups[app]), reverse=True)
+    else:
+        groups = {"all apps": items}
+        group_order = ["all apps"]
 
-        cm = clusters_meta[cid]
-        cm["count"] += 1
-        if len(cm["examples"]) < args.examples:
-            cm["examples"].append(text)
-        if meta.get("app"):
-            cm["apps"].add(meta["app"])
-        if meta.get("level"):
-            cm["levels"].add(meta["level"])
-        ts = meta.get("timestamp")
-        if ts is not None:
-            timestamped += 1
-            if cm["first_seen"] is None or ts < cm["first_seen"]:
-                cm["first_seen"] = ts
-            if cm["last_seen"] is None or ts > cm["last_seen"]:
-                cm["last_seen"] = ts
-            if len(cm["all_timestamps"]) <= cap:
-                cm["all_timestamps"].append(ts)
-
+    results = {}
+    for label in group_order:
+        results[label] = cluster_group(
+            groups[label], args.mode, args.examples, cap, args.config, args.persist
+        )
     elapsed = time.time() - start
 
-    # (cluster_id, template, count) rows -- the shape every report below
-    # consumes, whichever mode produced them.
-    if args.mode == "train":
-        rows = sorted(
-            ((c.cluster_id, c.get_template(), c.size) for c in miner.drain.clusters),
-            key=lambda r: r[2], reverse=True,
-        )
-    else:
-        template_lookup = {c.cluster_id: c.get_template() for c in miner.drain.clusters}
-        template_lookup[UNRECOGNIZED_ID] = UNRECOGNIZED_TEMPLATE
-        rows = sorted(
-            ((cid, template_lookup.get(cid, f"(unknown cluster {cid})"), m["count"])
-             for cid, m in clusters_meta.items()),
-            key=lambda r: r[2], reverse=True,
-        )
+    grand_total = sum(r[2] for r in results.values())
+    grand_timestamped = sum(r[3] for r in results.values())
+    grand_unrecognized = sum(r[4] for r in results.values())
 
-    print(f"\nProcessed {total} lines from {len(files_seen)} file(s) in {elapsed:.2f}s [{args.mode} mode]")
+    print(
+        f"\nProcessed {grand_total} lines from {len(files_seen)} file(s) in {elapsed:.2f}s "
+        f"[{args.mode} mode]{' [by-app: ' + str(len(group_order)) + ' groups]' if args.by_app else ''}"
+    )
     if args.mode == "train":
-        print(f"Found {len(rows)} distinct templates ({timestamped}/{total} lines had a usable timestamp)\n")
+        total_templates = sum(len(r[0]) for r in results.values())
+        print(f"Found {total_templates} distinct templates "
+              f"({grand_timestamped}/{grand_total} lines had a usable timestamp)")
     else:
+        pct = grand_unrecognized / max(grand_total, 1)
         print(
-            f"Matched against {len(miner.drain.clusters)} trained templates; "
-            f"{unrecognized}/{total} lines ({unrecognized / max(total, 1):.1%}) matched none of them "
-            f"({timestamped}/{total} lines had a usable timestamp)\n"
+            f"{grand_unrecognized}/{grand_total} lines ({pct:.1%}) matched none of the "
+            f"trained catalog ({grand_timestamped}/{grand_total} lines had a usable timestamp)"
         )
 
-    header = f"{'COUNT':>7}  {'ID':>4}  {'APPS':<20}  TEMPLATE"
-    print(header)
-    print("-" * len(header))
-    for cid, template, count in rows[: args.top]:
-        meta = clusters_meta.get(cid, {"apps": set(), "levels": set()})
-        apps = ",".join(sorted(meta["apps"])) or "-"
-        print(f"{count:>7}  {cid:>4}  {apps:<20}  {template}")
-
-    if len(rows) > args.top:
-        print(f"\n... and {len(rows) - args.top} more (raise --top to see them)")
+    for label in group_order:
+        rows, clusters_meta, grp_total, grp_timestamped, grp_unrecognized = results[label]
+        render_report(
+            label, rows, clusters_meta, grp_total, grp_timestamped, grp_unrecognized,
+            args.mode, args.top, cap, indent=("  " if args.by_app else ""),
+        )
 
     if args.output:
-        full_results = []
-        for cid, template, count in rows:
-            meta = clusters_meta.get(cid, {"examples": [], "apps": set(), "levels": set()})
-            has_full = count <= cap
-            full_results.append(
-                {
-                    "cluster_id": cid,
-                    "count": count,
-                    "template": template,
-                    "unrecognized": cid == UNRECOGNIZED_ID,
-                    "apps": sorted(meta["apps"]),
-                    "levels": sorted(meta["levels"]),
-                    "first_seen": iso(meta.get("first_seen")),
-                    "last_seen": iso(meta.get("last_seen")),
-                    # Every occurrence's timestamp, but only when the count is
-                    # low enough that "every occurrence" is a short list --
-                    # null (not a lossy partial list) once a cluster grows
-                    # past --full-timestamps-below.
-                    "all_timestamps": (
-                        [iso(t) for t in sorted(meta.get("all_timestamps", []))] if has_full else None
-                    ),
-                    "examples": meta["examples"],
-                }
-            )
+        if args.by_app:
+            full_results = {
+                label: build_output_rows(results[label][0], results[label][1], cap)
+                for label in group_order
+            }
+        else:
+            rows, clusters_meta, *_ = results["all apps"]
+            full_results = build_output_rows(rows, clusters_meta, cap)
         Path(args.output).write_text(json.dumps(full_results, indent=2), encoding="utf-8")
-        print(f"\nWrote full results ({len(full_results)} templates) to {args.output}")
+        n_templates = (
+            sum(len(v) for v in full_results.values()) if args.by_app else len(full_results)
+        )
+        print(f"\nWrote full results ({n_templates} templates) to {args.output}")
 
     if args.collapsed_output:
-        # Chronological, not count-sorted -- this is meant to read like a
-        # timeline an LLM can follow, not a leaderboard. Clusters with no
-        # derivable timestamp sort last rather than crashing the sort.
-        ordered = sorted(
-            rows,
-            key=lambda r: clusters_meta.get(r[0], {}).get("first_seen") or float("inf"),
-        )
-        out_lines = []
-        for cid, template, count in ordered:
-            meta = clusters_meta.get(cid, {})
-            if count <= cap and meta.get("all_timestamps"):
-                # Low-count: show every occurrence, not just the endpoints --
-                # a gap between occurrence 2 and 3 of 3 is exactly the kind of
-                # thing a first/last range would silently erase.
-                stamps = [iso(t) for t in sorted(meta["all_timestamps"])]
-                when = ", ".join(stamps)
-            else:
-                first, last = iso(meta.get("first_seen")), iso(meta.get("last_seen"))
-                when = f"{first} -> {last}" if (first and last and first != last) else (first or "no timestamp")
-            apps = ",".join(sorted(meta.get("apps", set()))) or "-"
-            # Not every source tags severity -- audit/kernel/tailscaled lines
-            # in a Mezmo export have no "level" field at all, so "-" here is
-            # an honest "no severity reported", not a missing-data bug.
-            levels = ",".join(sorted(meta.get("levels", set()))) or "-"
-            flag = "  [SINGLE OCCURRENCE]" if count == 1 else ""
-            out_lines.append(f"[{when}] x{count} ({apps}) [{levels}]{flag}  {template}")
+        if args.by_app:
+            out_lines = []
+            for label in group_order:
+                rows, clusters_meta, *_ = results[label]
+                out_lines.append(f"== {label} ==")
+                out_lines.extend(build_collapsed_lines(rows, clusters_meta, cap))
+                out_lines.append("")
+        else:
+            rows, clusters_meta, *_ = results["all apps"]
+            out_lines = build_collapsed_lines(rows, clusters_meta, cap)
         Path(args.collapsed_output).write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        n_out = sum(1 for l in out_lines if l.startswith("["))
         print(
             f"\nWrote collapsed transcript to {args.collapsed_output}: "
-            f"{total} raw lines -> {len(out_lines)} lines "
-            f"({total / max(len(out_lines), 1):.0f}x reduction)"
+            f"{grand_total} raw lines -> {n_out} lines "
+            f"({grand_total / max(n_out, 1):.0f}x reduction)"
         )
 
 
