@@ -302,8 +302,12 @@ def main():
             else:
                 when = first or "no timestamp"
             apps = ",".join(sorted(meta.get("apps", set()))) or "-"
+            # Not every source tags severity -- audit/kernel/tailscaled lines
+            # in a Mezmo export have no "level" field at all, so "-" here is
+            # an honest "no severity reported", not a missing-data bug.
+            levels = ",".join(sorted(meta.get("levels", set()))) or "-"
             flag = "  [SINGLE OCCURRENCE]" if cluster.size == 1 else ""
-            out_lines.append(f"[{when}] x{cluster.size} ({apps}){flag}  {cluster.get_template()}")
+            out_lines.append(f"[{when}] x{cluster.size} ({apps}) [{levels}]{flag}  {cluster.get_template()}")
         Path(args.collapsed_output).write_text("\n".join(out_lines) + "\n", encoding="utf-8")
         print(
             f"\nWrote collapsed transcript to {args.collapsed_output}: "

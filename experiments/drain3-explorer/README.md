@@ -86,10 +86,18 @@ python3 mine_templates.py --input /path/to/your-export.jsonl --collapsed-output 
 ```
 
 ```
-[2026-08-03T19:08:40Z -> 2026-08-03T19:09:27Z] x3934 (fastloop)  Stop controller with status STOPPED
-[2026-08-03T19:08:45Z -> 2026-08-03T19:09:25Z] x84 (audit)  AVC apparmor "DENIED" operation "ptrace" ...
-[2026-08-03T19:09:04Z] x1 (user@1000.service)  [SINGLE OCCURRENCE]  [temperature-probe] ERROR [Errno <NUM>] No such file or directory ...
+[2026-08-03T19:08:40Z -> 2026-08-03T19:09:27Z] x3934 (fastloop) [DEBUG]  Stop controller with status STOPPED
+[2026-08-03T19:08:45Z -> 2026-08-03T19:09:25Z] x84 (audit) [-]  AVC apparmor "DENIED" operation "ptrace" ...
+[2026-08-03T19:09:26Z] x1 (user@1000.service) [ERROR]  [SINGLE OCCURRENCE]  [temperature-probe] ERROR [Errno <NUM>] No such file or directory ...
 ```
+
+`(app)` and `[level]` are both tracked and shown per cluster. `[-]` for level is
+an honest "this source doesn't report one" -- confirmed on the real p16
+export: `audit`/`kernel`/`tailscaled.service`/`central-offloader` never carry
+a `level` field at all, while `fastloop`/`pickle_rosbridge`/`user@1000.service`
+do, including the one real `[ERROR]` in this dataset (the temperature-probe
+fault) -- exactly the kind of thing worth a severity filter or a "surface all
+ERRORs regardless of count" rule downstream.
 
 On the real p16 exports this ran on: the single-session file collapsed 475
 raw lines into 5 (95x), and the full 20k-line firehose collapsed into 51
