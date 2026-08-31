@@ -251,6 +251,53 @@ individual timestamp instead of just the count. Single-occurrence and
 unrecognized (inference-mode) templates get their own colored badge so
 they stand out from routine, high-volume rows.
 
+## Drilling down to every real occurrence (`--index-output` + `lookup_cluster.py`)
+
+Everything above is a *census*: what happened, roughly, and how often.
+`--output`'s `examples`/`all_timestamps` are deliberately capped (2
+examples by default; full timestamps only below `--full-timestamps-below`
+occurrences) so the summary stays small even for a cluster that fired
+thousands of times. That's the right trade for an overview, but it means
+the summary alone can never answer "show me every real line and every
+real timestamp for this one specific template" -- once a cluster passes
+those caps, the rest of its occurrences were never retained anywhere.
+
+`--index-output` builds a second, parallel structure to fix that -- a
+*lookup*, not a census. For every single line (no cap), it records where
+that line lives: which file, which byte offset, which line number, and
+its timestamp. Not a copy of the line's text -- just a pointer back to
+it, the same way a search engine's inverted index maps a term to a
+"postings list" of document locations rather than duplicating every
+document under every term. On the real 20,000-line file this ran against,
+that pointer index came out to 903KB versus the original file's 31.8MB
+-- about 35x smaller, because a `[file_idx, byte_offset, line_no,
+timestamp]` pointer costs a few bytes while the line it points to might
+be 500+ bytes of JSON envelope.
+
+```bash
+python3 mine_templates.py --input export.jsonl --output results.json --index-output results_index.json
+python3 lookup_cluster.py --index results_index.json --cluster 199
+```
+
+```
+Cluster 199: 1 occurrence(s) total
+
+[2026-08-31T10:24:41Z] export.jsonl:13515  {"__key":"logline:...","message":"Starting container: container label is CAAU5624483.",...}
+```
+
+`--cluster` takes the `cluster_id` from `--output`'s JSON (or the `ID`
+column printed to the console). For a `--by-app` index, pass `--group
+<app>` too (`--list-groups` shows what's available) -- each app has its
+own independent cluster-id numbering, so a bare `--cluster 1` is
+ambiguous without knowing which app's tree it came from. `--limit N`
+caps how many occurrences print, useful for a cluster with thousands.
+
+This is genuinely a different tool than `--output`/`--collapsed-output`,
+not an upgrade to them -- keep using those for "what does this file
+contain, overall." Reach for `--index-output` + `lookup_cluster.py` only
+when you already know which template you care about and want its full,
+uncapped history.
+
 ## Reading the output
 
 ```

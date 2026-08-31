@@ -51,6 +51,11 @@ Usage:
     # low-volume app's (api-server) templates. Not combinable with
     # --mode infer / --persist yet.
     python3 mine_templates.py --input export.jsonl --by-app --collapsed-output collapsed.txt
+
+    # build a cluster -> raw-line index alongside the summary, so you can
+    # later pull every real occurrence of one specific template (not just
+    # the couple of capped examples in --output) via lookup_cluster.py
+    python3 mine_templates.py --input export.jsonl --output results.json --index-output results_index.json
 """
 import argparse
 import glob
@@ -74,8 +79,18 @@ UNRECOGNIZED_TEMPLATE = "(unrecognized -- no match in the trained catalog)"
 
 
 def iter_lines(input_patterns):
-    """Yield (file_path, line_no, raw_line) for every non-blank line across
-    all --input arguments, which may be a file, a directory, or a glob."""
+    """Yield (file_path, line_no, byte_offset, raw_line) for every non-blank
+    line across all --input arguments, which may be a file, a directory,
+    or a glob.
+
+    byte_offset is where that line starts in its file, in bytes -- kept so
+    a cluster's postings index (see cluster_group) can later seek straight
+    back to one exact line instead of re-scanning the whole file. It's
+    read via explicit readline()+tell(), not `for line in fh`: Python's
+    docs note that tell() isn't reliable while iterating a text file with
+    a for-loop, because of internal read-ahead buffering -- readline()
+    doesn't have that problem.
+    """
     for pattern in input_patterns:
         is_glob = any(ch in pattern for ch in "*?[]")
         matches = sorted(glob.glob(pattern)) if is_glob else [pattern]
@@ -92,10 +107,16 @@ def iter_lines(input_patterns):
                 continue
             for f in files:
                 with f.open("r", errors="replace") as fh:
-                    for line_no, line in enumerate(fh, start=1):
-                        line = line.rstrip("\n")
+                    line_no = 0
+                    while True:
+                        offset = fh.tell()
+                        raw = fh.readline()
+                        if not raw:
+                            break
+                        line_no += 1
+                        line = raw.rstrip("\n")
                         if line.strip():
-                            yield f, line_no, line
+                            yield f, line_no, offset, line
 
 
 def _epoch_seconds(value):
@@ -207,18 +228,34 @@ def new_clusters_meta():
     }
 
 
-def cluster_group(text_meta_pairs, mode, examples_cap, ts_cap, config_path, persist_path):
+def cluster_group(items, mode, examples_cap, ts_cap, config_path, persist_path):
     """Run one independent Drain3 pass (its own tree, its own catalog) over
-    one group of (text, meta) pairs -- either "everything" or one app's
-    lines, depending on how the caller partitioned things. Returns
-    (rows, clusters_meta, total, timestamped, unrecognized), where rows is
-    a list of (cluster_id, template, count) sorted by count descending.
+    one group of (text, meta, pointer) triples -- either "everything" or
+    one app's lines, depending on how the caller partitioned things.
+
+    Builds two parallel structures per cluster: `clusters_meta` (capped --
+    a couple of example lines, up to ts_cap timestamps -- the summary this
+    tool has always produced) and `postings` (uncapped -- every single
+    line's pointer, no exceptions). postings is the inverted index that
+    makes "show me every real occurrence of cluster N" possible later,
+    the same way a search engine's postings list maps a term to every
+    document containing it: cluster_id -> [pointer, pointer, ...], where
+    each pointer is (file, byte_offset, line_no) plus that line's
+    timestamp -- a location, not a copy of the text. Looking one up means
+    seeking straight to that byte offset in the original file instead of
+    re-scanning it, and instead of being stuck with whatever examples/
+    all_timestamps happened to get captured under the summary's caps.
+
+    Returns (rows, clusters_meta, total, timestamped, unrecognized,
+    postings), where rows is a list of (cluster_id, template, count)
+    sorted by count descending.
     """
     miner = build_template_miner(config_path, persist_path)
     clusters_meta = defaultdict(new_clusters_meta)
+    postings = defaultdict(list)
     total = timestamped = unrecognized = 0
 
-    for text, meta in text_meta_pairs:
+    for text, meta, pointer in items:
         total += 1
         if mode == "train":
             result = miner.add_log_message(text)
@@ -249,6 +286,8 @@ def cluster_group(text_meta_pairs, mode, examples_cap, ts_cap, config_path, pers
             if len(cm["all_timestamps"]) <= ts_cap:
                 cm["all_timestamps"].append(ts)
 
+        postings[cid].append((pointer[0], pointer[1], pointer[2], ts))
+
     if mode == "train":
         rows = sorted(
             ((c.cluster_id, c.get_template(), c.size) for c in miner.drain.clusters),
@@ -262,7 +301,7 @@ def cluster_group(text_meta_pairs, mode, examples_cap, ts_cap, config_path, pers
              for cid, m in clusters_meta.items()),
             key=lambda r: r[2], reverse=True,
         )
-    return rows, clusters_meta, total, timestamped, unrecognized
+    return rows, clusters_meta, total, timestamped, unrecognized, postings
 
 
 def render_report(label, rows, clusters_meta, total, timestamped, unrecognized, mode, top, cap, indent=""):
@@ -386,6 +425,14 @@ def main():
              "not combinable with --mode infer or --persist (per-app catalogs aren't "
              "supported yet).",
     )
+    parser.add_argument(
+        "--index-output", default=None,
+        help="Optional path to write a cluster -> raw-line index: for every cluster, an "
+             "uncapped list of pointers (file, byte offset, line number, timestamp) to "
+             "every line that landed in it -- unlike --output's examples/all_timestamps, "
+             "which are deliberately capped. Pair with lookup_cluster.py to pull every "
+             "real occurrence of one template on demand.",
+    )
     args = parser.parse_args()
 
     if args.mode == "infer" and not (args.persist and Path(args.persist).exists()):
@@ -402,21 +449,24 @@ def main():
     cap = args.full_timestamps_below
     files_seen = set()
     total = 0
-    items = []  # [(text, meta), ...] materialized once, grouped below
+    items = []  # [(text, meta, pointer), ...] materialized once, grouped below
+    # pointer = (file_path_str, byte_offset, line_no) -- a location, not a
+    # copy of the line -- so a cluster's postings index (built below in
+    # cluster_group) stays small even though it references every line.
 
-    for f, _line_no, raw_line in iter_lines(args.input):
+    for f, line_no, offset, raw_line in iter_lines(args.input):
         if args.limit and total >= args.limit:
             break
         files_seen.add(str(f))
         text, meta = extract_text(raw_line, args.field, args.line_field)
-        items.append((text, meta))
+        items.append((text, meta, (str(f), offset, line_no)))
         total += 1
 
     start = time.time()
     if args.by_app:
         groups = defaultdict(list)
-        for text, meta in items:
-            groups[meta.get("app") or "(unknown app)"].append((text, meta))
+        for text, meta, pointer in items:
+            groups[meta.get("app") or "(unknown app)"].append((text, meta, pointer))
         group_order = sorted(groups, key=lambda app: len(groups[app]), reverse=True)
     else:
         groups = {"all apps": items}
@@ -449,7 +499,7 @@ def main():
         )
 
     for label in group_order:
-        rows, clusters_meta, grp_total, grp_timestamped, grp_unrecognized = results[label]
+        rows, clusters_meta, grp_total, grp_timestamped, grp_unrecognized, _grp_postings = results[label]
         render_report(
             label, rows, clusters_meta, grp_total, grp_timestamped, grp_unrecognized,
             args.mode, args.top, cap, indent=("  " if args.by_app else ""),
@@ -488,6 +538,43 @@ def main():
             f"{grand_total} raw lines -> {n_out} lines "
             f"({grand_total / max(n_out, 1):.0f}x reduction)"
         )
+
+    if args.index_output:
+        # Normalize file paths into one shared list instead of repeating
+        # the full string on every pointer -- the same "store a location,
+        # not a copy" idea applied one level down: a pointer becomes
+        # [file_idx, byte_offset, line_no, timestamp] instead of a dict
+        # with a repeated path string, which matters once a cluster has
+        # thousands of pointers.
+        file_list = sorted(files_seen)
+        file_idx = {f: i for i, f in enumerate(file_list)}
+
+        def encode_postings(postings):
+            return {
+                str(cid): [
+                    [file_idx[pfile], offset, line_no, iso(ts)]
+                    for pfile, offset, line_no, ts in plist
+                ]
+                for cid, plist in postings.items()
+            }
+
+        if args.by_app:
+            index_doc = {
+                "format": ["file_idx", "byte_offset", "line_no", "timestamp"],
+                "files": file_list,
+                "groups": {label: encode_postings(results[label][5]) for label in group_order},
+            }
+            n_postings = sum(len(v) for g in index_doc["groups"].values() for v in g.values())
+        else:
+            index_doc = {
+                "format": ["file_idx", "byte_offset", "line_no", "timestamp"],
+                "files": file_list,
+                "postings": encode_postings(results["all apps"][5]),
+            }
+            n_postings = sum(len(v) for v in index_doc["postings"].values())
+
+        Path(args.index_output).write_text(json.dumps(index_doc), encoding="utf-8")
+        print(f"\nWrote cluster index ({n_postings} line pointers) to {args.index_output}")
 
 
 if __name__ == "__main__":

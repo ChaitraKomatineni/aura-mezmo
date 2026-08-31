@@ -7,3 +7,4 @@ __pycache__/
 *.state
 results*.json
 collapsed*.txt
+*_index.json
