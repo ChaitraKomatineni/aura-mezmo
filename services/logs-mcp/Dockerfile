@@ -8,6 +8,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
+COPY template_mining.py .
+COPY drain3.ini .
 
 EXPOSE 8091
 

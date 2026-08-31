@@ -2,11 +2,18 @@
 
 A standalone experiment, separate from the rest of this repo: feed it a
 batch of unstructured logs and see what templates
-[Drain3](https://github.com/logpai/Drain3) mines out of them. Nothing here
-is wired into `docker-compose.yml`, the Aura agent, or the web UI — it's a
-sandbox for evaluating whether template mining is worth building into the
-pipeline (e.g. as a new `logs-mcp` tool, or to auto-populate the
-`robot-shift-notes` skill's keyword table) before committing to that.
+[Drain3](https://github.com/logpai/Drain3) mines out of them. This folder
+itself is still not wired into `docker-compose.yml`/the Aura agent/the
+web UI -- it's the sandbox for developing and proving out the approach
+before it goes anywhere real.
+
+That said, the approach *did* graduate: `services/logs-mcp/` now runs
+the same clustering + drill-down design in production, as two tools
+Aura actually calls (`summarize_templates`, `lookup_template`) --
+see `services/logs-mcp/template_mining.py` and `config/aura.toml`'s
+system prompt for how. This folder remains the place to prototype
+config/masking changes and CLI-driven one-off investigations before
+they get ported over.
 
 ## What it does
 
@@ -339,11 +346,12 @@ finished config — read them alongside a real run's output and adjust:
 
 ## Where this could go next (not built yet)
 
-- A `logs_summarize_templates` tool on `logs-mcp`, so a shift-notes request
-  starts from a compact template census (counts per event shape) instead
-  of Aura discovering repetition itself via Scratchpad's token-threshold
-  exploration — genuinely complementary to Scratchpad, not a replacement
-  for it.
+- ~~A `logs_summarize_templates` tool on `logs-mcp`~~ -- built. See
+  `services/logs-mcp/` (`summarize_templates` + `lookup_template`,
+  described in `config/aura.toml`'s system prompt). Genuinely
+  complementary to Scratchpad's token-threshold exploration, not a
+  replacement for it -- Scratchpad still handles a `lookup_template`
+  result that comes back large.
 - Auto-drafting rows for `robot-shift-notes/SKILL.md`'s keyword reference
   table from whatever templates a run surfaces, instead of relying on
   someone noticing and confirming each keyword by hand.

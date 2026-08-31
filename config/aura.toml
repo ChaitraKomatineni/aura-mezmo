@@ -30,12 +30,24 @@ Authorization = "Bearer {{ env.MEZMO_API_KEY | default: '' }}"
 [mcp.servers.logs]
 transport = "http_streamable"
 url = "http://logs-mcp:8091/mcp"
-description = "Search and read log files uploaded through the web UI"
+description = "Search, read, and template-cluster log files uploaded through the web UI"
 
 # Scratchpad interception thresholds are per-server and per-tool — enabling
 # [agent.scratchpad] alone does nothing without these. "*" catches every
 # tool this server exposes; a search over a session's worth of logs is
 # exactly the kind of output this is meant to divert.
+#
+# This wildcard also covers the two newer tools (summarize_templates,
+# lookup_template) without any extra entries, and that's deliberate, not
+# an oversight: summarize_templates is already compact by construction
+# (Drain3 collapsed the repetition before the tool even returns, capped
+# further by its own `top` param), so it usually stays under 2000 tokens
+# and Scratchpad rarely triggers for it. lookup_template is the opposite
+# case on purpose -- a deliberate, scoped drill-down into full raw lines
+# for one specific cluster, which can genuinely exceed 2000 tokens for a
+# high-occurrence cluster. That's exactly the large-output-exploration
+# case Scratchpad exists for, so leaving it under the same wildcard is
+# correct rather than something to special-case around.
 [mcp.servers.logs.scratchpad]
 "*" = { min_tokens = 2000 }
 
@@ -53,8 +65,35 @@ You are a log and bug triage assistant for the Aura Mezmo playground.
 You have three tool sources:
 
 1. `mezmo_*` — live log search/export against the user's Mezmo account.
-2. `logs_*` — search and read log files the user has uploaded via the UI.
+2. `logs_*` — search, read, and template-cluster log files the user has
+   uploaded via the UI.
 3. `freshdesk_*` — search Freshdesk support tickets (bugs).
+
+For any "what's in this file" / "what happened" / "summarize this log"
+question about an uploaded file, call `logs_summarize_templates` FIRST,
+not `logs_read_log` or `logs_search_logs`. It clusters the file into
+templates (Drain3) and returns one row per distinct event shape with a
+count, affected apps/levels, a time range, and a couple of example
+lines — repetition already collapsed out, at a fraction of the tokens
+raw lines would cost. Use `by_app=true` when the file mixes a
+high-volume app with lower-volume ones you don't want dominated (e.g. a
+noisy sensor loop drowning out a rarer service's events). Use
+`min_count`/`level` to narrow the summary before reading it, e.g. to
+surface only ERROR-carrying templates or only routine (high-count)
+behavior.
+
+Each row from `logs_summarize_templates` carries a `cluster_id`.
+If you need every real occurrence of one specific row — not just its
+capped example lines and timestamps — call `logs_lookup_template` with
+that same `cluster_id` (and the same `by_app`/`group` it came from).
+Reach for this when a template's count is low enough that every instance
+plausibly matters, when you need to quote an exact line for an answer,
+or when the user asks to drill into one specific event shape by name.
+
+`logs_read_log`/`logs_search_logs` are still the right tools for
+line-range reads and free-text substring search — use them when the
+question isn't about the file's overall shape (e.g. "does this file
+contain the string X anywhere").
 
 When asked to investigate an issue or a Freshdesk ticket, correlate
 across whichever sources are relevant: pull the ticket details, search
