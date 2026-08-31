@@ -231,6 +231,26 @@ mode already sorts everything together for that.
 each app would need its own saved catalog file, which isn't built. Use
 pooled mode for train-once/infer-later workflows for now.
 
+## Viewing results in a browser (`view_results.py`)
+
+The raw `--output` JSON is complete but not fun to scroll. `view_results.py`
+turns any `--output` file (pooled or `--by-app`) into one self-contained
+HTML page — no server, no build step, just open it in a browser:
+
+```bash
+python3 mine_templates.py --input export.jsonl --output results.json
+python3 view_results.py --results results.json
+# -> writes results.html next to it
+```
+
+It looks the way a Mezmo/log-viewer table does: a searchable box, clickable
+severity chips (ERROR/WARN/INFO/DEBUG) to filter by level, a group dropdown
+when the input came from `--by-app`, sortable columns, and click-to-expand
+rows that reveal the full example lines and (for low-count clusters) every
+individual timestamp instead of just the count. Single-occurrence and
+unrecognized (inference-mode) templates get their own colored badge so
+they stand out from routine, high-volume rows.
+
 ## Reading the output
 
 ```
