@@ -21,9 +21,14 @@ memory. Mezmo's own docs (docs.mezmo.com/docs/mezmo-mcp) describe tools in
 natural-language examples, not raw JSON parameter names, and this script
 had no network path to mcp.mezmo.com to confirm the literal schema in
 advance. Step 1 below calls `tools/list` first and writes the live schema
-to disk — that's the ground truth, not anything guessed here. Each
-individual tool call is wrapped so a wrong argument guess shows up as a
-recorded error in the output rather than crashing the whole run.
+to disk (report["tools_schema"]) — that's the ground truth, not anything
+guessed here. Each tool call is adaptive: on a "missing field `X`"
+deserialize error, it fills in a guess for X and retries (serde-style
+errors report one missing field at a time), and for a time-like field it
+cycles through several plausible value formats on repeated failures,
+since the correct format isn't documented either. Every round's arguments
+and outcome are recorded in report["calls"][i]["attempts"], so a wrong
+guess is diagnosable rather than silently wrong or swallowed.
 
 Usage:
     pip install -r requirements.txt
@@ -86,6 +91,25 @@ def find_tool(tools_schema: list[dict], candidates: list[str]) -> dict | None:
     return None
 
 
+TIME_FIELD_HINTS = ("since", "relative_time", "time_range", "range", "window")
+MISSING_FIELD_RE = re.compile(r"missing field `([^`]+)`")
+
+
+def is_time_field(name: str) -> bool:
+    n = name.lower()
+    return any(h in n for h in TIME_FIELD_HINTS)
+
+
+def time_candidates(minutes: int) -> list[str]:
+    """Ordered guesses for a relative-time field's value format -- we do
+    not know which one a given account/tool actually wants (Mezmo's docs
+    describe these tools with natural-language examples, not a raw value
+    spec), so call_adaptive() below tries each in turn on a deserialize
+    error and records every attempt rather than asserting the first guess
+    is correct."""
+    return [f"{minutes}m", f"last {minutes} minutes", f"-{minutes}m", f"PT{minutes}M", str(minutes)]
+
+
 def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, field: str):
     """Fill one JSON-schema property with a plausible value based on its
     name and declared type. This is a heuristic, not a certainty -- the
@@ -100,8 +124,8 @@ def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, 
         return field
     if "limit" in name:
         return 20 if ptype == "integer" else "20"
-    if any(k in name for k in ("relative_time", "time_range", "range", "window")):
-        return f"last {minutes} minutes"
+    if is_time_field(name):
+        return time_candidates(minutes)[0]
     if "minutes" in name:
         return minutes if ptype == "integer" else str(minutes)
     if "mode" in name:
@@ -115,12 +139,19 @@ def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, 
     return ""
 
 
+def get_input_schema(tool_schema: dict) -> dict:
+    """mcp's Tool model's Python field is `input_schema` (JSON alias
+    `inputSchema`, used only when dumped with by_alias=True). Check both
+    so this survives either serialization mode."""
+    return tool_schema.get("input_schema") or tool_schema.get("inputSchema") or {}
+
+
 def build_arguments(tool_schema: dict, *, minutes: int, query: str, field: str) -> dict:
-    """Walk a tool's inputSchema and fill required properties (plus a few
+    """Walk a tool's input schema and fill required properties (plus a few
     obviously-relevant optional ones) with guessed values. Returns the
     arguments dict actually sent -- always saved alongside the result so
     a guess that turns out wrong is diagnosable from the output file."""
-    schema = tool_schema.get("inputSchema", {}) or {}
+    schema = get_input_schema(tool_schema)
     props = schema.get("properties", {}) or {}
     required = set(schema.get("required", []) or [])
     args = {}
@@ -133,6 +164,55 @@ def build_arguments(tool_schema: dict, *, minutes: int, query: str, field: str) 
         if value is not None:
             args[prop_name] = value
     return args
+
+
+async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int, query: str, field: str, max_rounds: int = 8):
+    """Call a tool, and on a "missing field `X`" deserialize error, fill in
+    a guess for X and retry -- serde-style errors report one missing field
+    at a time, so a single guessing pass isn't enough to discover a multi-
+    field required schema. For a field whose name looks time-related, cycle
+    through time_candidates() on repeated failures instead of giving up
+    after one guess, since the correct value FORMAT (not just field name)
+    is also unconfirmed. Every round's arguments and outcome are recorded
+    and returned, whether or not the call eventually succeeded, so a wrong
+    guess is diagnosable rather than silently swallowed."""
+    args = dict(base_args)
+    time_tries: dict[str, int] = {}
+    attempts = []
+
+    for round_no in range(max_rounds):
+        try:
+            result = await client.call_tool_mcp(tool_name, args)
+            attempts.append({"round": round_no, "arguments": dict(args), "outcome": "success"})
+            return result, args, attempts
+        except Exception as exc:  # noqa: BLE001 -- diagnostic script, every failure mode is recorded, not swallowed
+            msg = str(exc)
+            attempts.append({"round": round_no, "arguments": dict(args), "outcome": "error", "error": msg})
+
+            m = MISSING_FIELD_RE.search(msg)
+            target = m.group(1) if m else None
+            if target is None:
+                # No explicit field name in the error -- if we already set a
+                # time-like field, assume it's the culprit and try the next
+                # candidate value for it before giving up.
+                target = next((k for k in args if is_time_field(k)), None)
+
+            if target is None:
+                break  # nothing left to adjust; stop and report this as the final error
+
+            if is_time_field(target):
+                tries = time_tries.get(target, -1) + 1
+                cands = time_candidates(minutes)
+                if tries >= len(cands):
+                    break  # exhausted every guess for this field
+                args[target] = cands[tries]
+                time_tries[target] = tries
+            elif target not in args:
+                args[target] = guess_value(target, {}, minutes=minutes, query=query, field=field)
+            else:
+                break  # already set this field and it's still wrong -- avoid looping forever
+
+    return None, args, attempts
 
 
 def result_to_plain(mcp_result) -> dict:
@@ -181,6 +261,7 @@ async def run(args) -> dict:
         "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "params": {"minutes": args.minutes, "query": args.query, "field": args.field},
         "tools_discovered": [],
+        "tools_schema": [],
         "calls": [],
     }
 
@@ -188,6 +269,10 @@ async def run(args) -> dict:
         tools_result = await client.list_tools_mcp()
         tools_schema = [t.model_dump(mode="json") for t in tools_result.tools]
         report["tools_discovered"] = [t["name"] for t in tools_schema]
+        # Full live schemas, not just names -- ground truth for exact
+        # parameter names/types, since Mezmo's docs describe tools in
+        # natural-language examples rather than raw JSON schema.
+        report["tools_schema"] = tools_schema
 
         for label, candidates in WANTED_TOOLS.items():
             tool = find_tool(tools_schema, candidates)
@@ -200,17 +285,27 @@ async def run(args) -> dict:
 
             entry["available"] = True
             entry["tool_name"] = tool["name"]
-            call_args = build_arguments(tool, minutes=args.minutes, query=args.query, field=args.field)
-            entry["arguments_sent"] = call_args
+            base_args = build_arguments(tool, minutes=args.minutes, query=args.query, field=args.field)
 
-            try:
-                mcp_result = await client.call_tool_mcp(tool["name"], call_args)
+            mcp_result, final_args, attempts = await call_adaptive(
+                client, tool["name"], base_args,
+                minutes=args.minutes, query=args.query, field=args.field,
+            )
+            entry["arguments_sent"] = final_args
+            entry["attempts"] = attempts
+            entry["rounds"] = len(attempts)
+
+            if mcp_result is not None:
                 entry["raw_result"] = result_to_plain(mcp_result)
-                entry["is_error"] = bool(getattr(mcp_result, "isError", False))
+                entry["is_error"] = bool(
+                    getattr(mcp_result, "is_error", None)
+                    if hasattr(mcp_result, "is_error")
+                    else getattr(mcp_result, "isError", False)
+                )
                 entry["text_blocks"] = extract_text_blocks(mcp_result)
-            except Exception as exc:  # noqa: BLE001 -- deliberately broad, this is a diagnostic script
+            else:
                 entry["is_error"] = True
-                entry["exception"] = f"{type(exc).__name__}: {exc}"
+                entry["exception"] = attempts[-1]["error"] if attempts else "unknown failure"
 
             report["calls"].append(entry)
 
@@ -248,6 +343,8 @@ def render_html(report: dict) -> str:
         f"field: <code>{esc(report['params']['field'])}</code></div>",
         "<div class='card'><b>Tools discovered on this account:</b><br>"
         + ", ".join(f"<code>{esc(n)}</code>" for n in report["tools_discovered"]) + "</div>",
+        "<details><summary>Full live tool schemas (ground truth parameter names/types)</summary>"
+        f"<pre>{esc(json.dumps(report.get('tools_schema', []), indent=2))}</pre></details>",
     ]
 
     for call in report["calls"]:
@@ -264,12 +361,18 @@ def render_html(report: dict) -> str:
             f"<div class='meta'>tool called: <code>{esc(call['tool_name'])}</code></div>"
         )
         parts.append(
-            "<div class='card'><b>Arguments sent</b>"
+            "<div class='card'><b>Arguments sent</b> (final, after "
+            f"{call.get('rounds', 1)} attempt(s))"
             f"<pre>{esc(json.dumps(call.get('arguments_sent', {}), indent=2))}</pre></div>"
         )
+        if call.get("rounds", 1) > 1:
+            parts.append(
+                "<details><summary>Attempt history (each round's arguments and outcome)</summary>"
+                f"<pre>{esc(json.dumps(call.get('attempts', []), indent=2))}</pre></details>"
+            )
 
         if call.get("exception"):
-            parts.append(f"<div class='card err'><b>Call failed</b><pre>{esc(call['exception'])}</pre></div>")
+            parts.append(f"<div class='card err'><b>Call failed after every guess was exhausted</b><pre>{esc(call['exception'])}</pre></div>")
             continue
 
         status = "err" if call.get("is_error") else "ok"
