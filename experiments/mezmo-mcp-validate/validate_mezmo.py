@@ -103,6 +103,11 @@ RELATIVE_TIME_PARSE_ERROR = "failed to parse relative time"
 # be treated the same as "try a different time format" (see call_adaptive).
 QUERY_TOO_LARGE_RE = re.compile(r"query too large|exceeds the maximum limit", re.IGNORECASE)
 FIRST_NUMBER_RE = re.compile(r"\d+")
+# Seen against a real, already-narrowed query (host:gen1-prod2, a single
+# host) -- neither a format problem nor the documented size rejection
+# above, so treated as a transient upstream hiccup (simple retry) rather
+# than "the time value must be wrong."
+TRANSIENT_ERROR_RE = re.compile(r"sse stream ended without a response|embedding step failed|failed to create .*embeddings", re.IGNORECASE)
 
 
 def is_time_field(name: str) -> bool:
@@ -242,6 +247,7 @@ async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int
     args = dict(base_args)
     time_tries: dict[str, int] = {}
     volume_halvings: dict[str, int] = {}
+    transient_retries = 0
     attempts = []
 
     for round_no in range(max_rounds):
@@ -263,6 +269,19 @@ async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int
         m = MISSING_FIELD_RE.search(msg)
         if m:
             target = m.group(1)
+        elif TRANSIENT_ERROR_RE.search(msg):
+            # Neither a format problem nor a documented size rejection --
+            # "SSE stream ended without a response" and the embedding-step
+            # failure seen against a real, narrowed (host:gen1-prod2)
+            # query are consistent with a transient upstream hiccup, not
+            # proof the query itself is wrong. Retry the SAME arguments
+            # unchanged a couple of times before giving up, instead of
+            # falling through to "the time value must be wrong" and
+            # discarding a value that may have been fine.
+            if transient_retries < 2:
+                transient_retries += 1
+                continue
+            break  # exhausted transient retries; report as final rather than mangling the time value
         elif QUERY_TOO_LARGE_RE.search(msg):
             # The current time value's FORMAT was fine -- this is a volume
             # problem, not a parse problem. Halve whatever number is in it
