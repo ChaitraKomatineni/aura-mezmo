@@ -64,6 +64,28 @@
   .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.4; white-space: pre-wrap; }
   .msg.user { align-self: flex-end; background: var(--accent); color: #10131a; }
   .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+
+  /* Reasoning/tool-step disclosure -- collapsed by default, distinct from
+     the final answer content that always renders below it. */
+  .steps { margin-bottom: 8px; }
+  .steps-toggle {
+    background: transparent; border: none; color: var(--muted); cursor: pointer;
+    padding: 0; font-size: 12px; text-decoration: underline dotted;
+  }
+  .steps-toggle:hover { color: var(--text); }
+  .steps-body {
+    display: none; margin-top: 6px; padding: 8px 10px;
+    border-left: 2px solid var(--border); color: var(--muted);
+    white-space: pre-wrap; font-size: 12px; line-height: 1.5;
+  }
+  .steps-body.open { display: block; }
+  .steps-body .step { margin-bottom: 6px; }
+  .steps-body .step.reasoning { color: var(--text); font-style: italic; }
+  .steps-body .step .tag {
+    display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px;
+    background: var(--accent-dim); color: var(--text); margin-right: 6px;
+  }
+  .stopped-tag { color: var(--danger); font-size: 11px; margin-left: 6px; font-style: italic; }
   .chat-input-row { display: flex; gap: 8px; margin-top: 16px; }
   .chat-input-row textarea {
     flex: 1; resize: none; min-height: 44px; max-height: 140px;
@@ -164,6 +186,7 @@
     <div class="chat-input-row">
       <textarea id="chat-input" placeholder="Ask about a log, an error, or a bug ticket..."></textarea>
       <button class="primary" id="chat-send">Send</button>
+      <button class="small-btn" id="chat-stop" style="display:none; border-color:var(--danger); color:var(--danger);">Stop</button>
     </div>
   </section>
 
@@ -325,6 +348,10 @@
         <textarea id="skill-description" rows="2" maxlength="1024" placeholder="One or two sentences: what this skill does AND when Aura should reach for it. This is what Aura sees at all times, so be specific — e.g. 'Use when asked to triage an e-stop event: which subsystem tripped it and whether it was operator- or system-triggered.'"></textarea>
       </div>
       <div class="field">
+        <label>Author <span class="hint" style="margin:0; display:inline;">(optional — who to ask about this skill)</span></label>
+        <input id="skill-author" maxlength="128" placeholder="e.g. Chaitra" />
+      </div>
+      <div class="field">
         <label>Instructions (Markdown)</label>
         <textarea id="skill-body" rows="16" class="mono" placeholder="Write the actual instructions here: what to search for, how to interpret it, what format to answer in. Plain Markdown — headings, lists, examples all work."></textarea>
       </div>
@@ -351,7 +378,9 @@ tabs.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
 const chatLog = document.getElementById('chat-log');
 const chatInput = document.getElementById('chat-input');
 const chatSend = document.getElementById('chat-send');
+const chatStop = document.getElementById('chat-stop');
 let history = [];
+let currentAbortController = null;
 
 function addMessage(role, text) {
   const div = document.createElement('div');
@@ -362,21 +391,133 @@ function addMessage(role, text) {
   return div;
 }
 
+// An assistant message is two parts, not one blob of text:
+//   - a collapsed-by-default "Show reasoning" disclosure, fed by
+//     aura.reasoning / aura.tool_requested / aura.tool_complete events
+//     (only shown at all once there's at least one step to show)
+//   - the final synthesized answer, always visible, never mixed with the
+//     step content above it
+function addAssistantMessage() {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'msg assistant';
+
+  const steps = document.createElement('div');
+  steps.className = 'steps';
+  steps.style.display = 'none';
+  const stepsToggle = document.createElement('button');
+  stepsToggle.className = 'steps-toggle';
+  stepsToggle.textContent = '▸ Show reasoning (0 steps)';
+  const stepsBody = document.createElement('div');
+  stepsBody.className = 'steps-body';
+  stepsToggle.addEventListener('click', () => {
+    stepsBody.classList.toggle('open');
+    stepsToggle.textContent = stepsToggle.textContent.replace(
+      stepsBody.classList.contains('open') ? '▸' : '▾',
+      stepsBody.classList.contains('open') ? '▾' : '▸'
+    );
+  });
+  steps.appendChild(stepsToggle);
+  steps.appendChild(stepsBody);
+
+  const content = document.createElement('div');
+  content.textContent = '...';
+
+  wrapper.appendChild(steps);
+  wrapper.appendChild(content);
+  chatLog.appendChild(wrapper);
+  chatLog.scrollTop = chatLog.scrollHeight;
+
+  let stepCount = 0;
+  return {
+    wrapper, content,
+    addStep(label, cls) {
+      steps.style.display = 'block';
+      stepCount += 1;
+      stepsToggle.textContent =
+        (stepsBody.classList.contains('open') ? '▾' : '▸') +
+        ' Show reasoning (' + stepCount + (stepCount === 1 ? ' step)' : ' steps)');
+      const line = document.createElement('div');
+      line.className = 'step' + (cls ? ' ' + cls : '');
+      line.textContent = label;
+      stepsBody.appendChild(line);
+      return line;
+    },
+  };
+}
+
+// Parses one SSE block's worth of already-split lines, tracking the
+// preceding `event:` line (if any) so custom aura.* events can be told
+// apart from bare OpenAI-shaped `data:` chunks, which carry no `event:`
+// line at all. See docs.mezmo.com/aura/streaming-api-guide.
+function handleSseLines(lines, msg, state) {
+  // state.pendingEvent persists ACROSS calls (i.e. across network chunk
+  // boundaries) -- an `event:` line and its `data:` line can legitimately
+  // arrive in two different reader.read() chunks, so this can't be a
+  // function-local variable reset on every call.
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('event:')) {
+      state.pendingEvent = trimmed.slice(6).trim();
+      continue;
+    }
+    if (!trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    const eventType = state.pendingEvent;
+    state.pendingEvent = null;
+    if (data === '[DONE]' || !data) continue;
+
+    let json;
+    try { json = JSON.parse(data); } catch (e) { continue; }
+
+    if (!eventType) {
+      // Plain OpenAI-compatible chunk -- the actual final-answer text.
+      const delta = json.choices?.[0]?.delta?.content;
+      if (delta) {
+        state.assistantText += delta;
+        msg.content.textContent = state.assistantText;
+        chatLog.scrollTop = chatLog.scrollHeight;
+      }
+      continue;
+    }
+
+    if (eventType === 'aura.tool_requested') {
+      msg.addStep('Calling ' + json.tool_name + '...', 'tool');
+    } else if (eventType === 'aura.tool_complete') {
+      const outcome = json.success === false ? 'failed' : 'done';
+      msg.addStep(
+        json.tool_name + ' ' + outcome + ' (' + (json.duration_ms ?? '?') + 'ms)' +
+          (json.success === false && json.error ? ': ' + json.error : ''),
+        'tool'
+      );
+    } else if (eventType === 'aura.reasoning') {
+      if (!state.reasoningLine) state.reasoningLine = msg.addStep('', 'reasoning');
+      state.reasoningLine.textContent += json.content || '';
+    }
+    // aura.progress / aura.session_info / aura.mcp_status / aura.tool_usage /
+    // aura.usage / aura.scratchpad_usage / approval events: not rendered
+    // yet -- ignored rather than mis-rendered.
+  }
+}
+
 async function sendChat(message) {
   showTab('chat');
   addMessage('user', message);
   history.push({ role: 'user', content: message });
   chatInput.value = '';
   chatSend.disabled = true;
+  chatStop.style.display = 'inline-block';
 
-  const assistantDiv = addMessage('assistant', '...');
-  let assistantText = '';
+  const msg = addAssistantMessage();
+  const state = { assistantText: '', reasoningLine: null, pendingEvent: null };
+  currentAbortController = new AbortController();
+  let stopped = false;
 
   try {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: history }),
+      signal: currentAbortController.signal,
     });
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -387,28 +528,28 @@ async function sendChat(message) {
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop();
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const json = JSON.parse(data);
-          const delta = json.choices?.[0]?.delta?.content;
-          if (delta) {
-            assistantText += delta;
-            assistantDiv.textContent = assistantText;
-            chatLog.scrollTop = chatLog.scrollHeight;
-          }
-        } catch (e) { /* ignore non-JSON / custom aura.* events */ }
-      }
+      handleSseLines(lines, msg, state);
     }
   } catch (e) {
-    assistantDiv.textContent = 'Error talking to Aura: ' + e;
+    if (e.name === 'AbortError') {
+      stopped = true;
+    } else {
+      msg.content.textContent = (state.assistantText || '') + '\n\nError talking to Aura: ' + e;
+    }
   }
 
-  if (assistantText) history.push({ role: 'assistant', content: assistantText });
+  if (stopped) {
+    const tag = document.createElement('span');
+    tag.className = 'stopped-tag';
+    tag.textContent = '[stopped]';
+    if (!state.assistantText) msg.content.textContent = '(stopped before any answer arrived)';
+    msg.content.appendChild(tag);
+  }
+
+  if (state.assistantText) history.push({ role: 'assistant', content: state.assistantText });
   chatSend.disabled = false;
+  chatStop.style.display = 'none';
+  currentAbortController = null;
 }
 
 chatSend.addEventListener('click', () => {
@@ -420,6 +561,9 @@ chatInput.addEventListener('keydown', (e) => {
     e.preventDefault();
     chatSend.click();
   }
+});
+chatStop.addEventListener('click', () => {
+  if (currentAbortController) currentAbortController.abort();
 });
 
 // ---------- Upload Logs ----------
@@ -724,6 +868,7 @@ const skillFormTitle = document.getElementById('skill-form-title');
 const skillNameInput = document.getElementById('skill-name');
 const skillDescInput = document.getElementById('skill-description');
 const skillDescCount = document.getElementById('skill-desc-count');
+const skillAuthorInput = document.getElementById('skill-author');
 const skillBodyInput = document.getElementById('skill-body');
 const skillFormError = document.getElementById('skill-form-error');
 const skillDeleteBtn = document.getElementById('skill-delete');
@@ -762,7 +907,10 @@ async function loadSkills() {
     card.className = 'skill-card' + (s.name === 'robot-shift-notes' ? ' builtin' : '');
     card.innerHTML =
       '<div class="name">' + s.name + '</div>' +
-      '<div class="desc">' + (s.description || '') + '</div>';
+      '<div class="desc">' + (s.description || '') + '</div>' +
+      (s.author
+        ? '<div class="hint" style="margin:8px 0 0;">by ' + s.author + '</div>'
+        : '<div class="hint" style="margin:8px 0 0; font-style:italic;">no author set</div>');
     card.addEventListener('click', () => openEditSkill(s.name));
     skillsList.appendChild(card);
   }
@@ -780,6 +928,7 @@ function openNewSkill() {
   skillNameInput.value = '';
   skillNameInput.disabled = false;
   skillDescInput.value = '';
+  skillAuthorInput.value = '';
   skillBodyInput.value = SKILL_BODY_TEMPLATE;
   skillFormError.textContent = '';
   skillDeleteBtn.style.display = 'none';
@@ -801,6 +950,7 @@ async function openEditSkill(name) {
   skillNameInput.value = name;
   skillNameInput.disabled = true; // renaming = new folder in Aura's eyes; keep it simple
   skillDescInput.value = s.description || '';
+  skillAuthorInput.value = s.author || '';
   skillBodyInput.value = s.body || '';
   skillFormError.textContent = '';
   skillDeleteBtn.style.display = 'inline-block';
@@ -817,6 +967,7 @@ document.getElementById('skill-save').addEventListener('click', async () => {
   const mode = skillFormPanel.dataset.mode;
   const name = skillNameInput.value.trim();
   const description = skillDescInput.value.trim();
+  const author = skillAuthorInput.value.trim() || null;
   const body = skillBodyInput.value.trim();
   skillFormError.textContent = '';
 
@@ -835,13 +986,13 @@ document.getElementById('skill-save').addEventListener('click', async () => {
       resp = await fetch('/api/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description, body }),
+        body: JSON.stringify({ name, description, body, author }),
       });
     } else {
       resp = await fetch('/api/skills/' + encodeURIComponent(skillFormPanel.dataset.originalName), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description, body }),
+        body: JSON.stringify({ description, body, author }),
       });
     }
     const data = await resp.json();

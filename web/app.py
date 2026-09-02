@@ -97,11 +97,18 @@ class SkillCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
     description: str = Field(..., min_length=1, max_length=1024)
     body: str = Field(..., min_length=1)
+    # Optional by design, not enforced: this app has no login/user-identity
+    # concept at all, so a required-but-unverified free-text field wouldn't
+    # give real accountability, just the appearance of it. Existing skills
+    # (e.g. robot-shift-notes) predate this field and simply show no author
+    # until someone edits them.
+    author: str | None = Field(None, max_length=128)
 
 
 class SkillUpdate(BaseModel):
     description: str = Field(..., min_length=1, max_length=1024)
     body: str = Field(..., min_length=1)
+    author: str | None = Field(None, max_length=128)
 
 
 def validate_skill_name(name: str) -> None:
@@ -144,14 +151,20 @@ def read_skill_md(path: Path) -> dict:
     return {
         "name": frontmatter.get("name", ""),
         "description": frontmatter.get("description", ""),
+        # Absent on skills written before this field existed (e.g.
+        # robot-shift-notes) -- None rather than "", so the UI can tell
+        # "never set" apart from "set to empty" if that distinction ever
+        # matters.
+        "author": frontmatter.get("author"),
         "body": body,
     }
 
 
-def write_skill_md(path: Path, name: str, description: str, body: str) -> None:
-    frontmatter = yaml.safe_dump(
-        {"name": name, "description": description}, sort_keys=False
-    )
+def write_skill_md(path: Path, name: str, description: str, body: str, author: str | None = None) -> None:
+    frontmatter_dict = {"name": name, "description": description}
+    if author:
+        frontmatter_dict["author"] = author
+    frontmatter = yaml.safe_dump(frontmatter_dict, sort_keys=False)
     path.write_text(f"---\n{frontmatter}---\n{body.rstrip()}\n", encoding="utf-8")
 
 
@@ -170,6 +183,7 @@ def list_skills():
                     {
                         "name": entry.name,
                         "description": parsed["description"],
+                        "author": parsed["author"],
                         "updated_at": skill_file.stat().st_mtime,
                     }
                 )
@@ -183,7 +197,12 @@ def get_skill(name: str):
     if not path.exists():
         raise HTTPException(404, f"No skill named '{name}'.")
     parsed = read_skill_md(path)
-    return {"name": name, "description": parsed["description"], "body": parsed["body"]}
+    return {
+        "name": name,
+        "description": parsed["description"],
+        "author": parsed["author"],
+        "body": parsed["body"],
+    }
 
 
 @app.post("/api/skills")
@@ -193,7 +212,7 @@ def create_skill(skill: SkillCreate):
     if path.exists():
         raise HTTPException(409, f"A skill named '{skill.name}' already exists.")
     path.mkdir(parents=True)
-    write_skill_md(path / "SKILL.md", skill.name, skill.description, skill.body)
+    write_skill_md(path / "SKILL.md", skill.name, skill.description, skill.body, skill.author)
     return {"name": skill.name, "restart_required": True}
 
 
@@ -203,7 +222,7 @@ def update_skill(name: str, skill: SkillUpdate):
     skill_file = path / "SKILL.md"
     if not skill_file.exists():
         raise HTTPException(404, f"No skill named '{name}'.")
-    write_skill_md(skill_file, name, skill.description, skill.body)
+    write_skill_md(skill_file, name, skill.description, skill.body, skill.author)
     return {"name": name, "restart_required": True}
 
 
