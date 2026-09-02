@@ -5,15 +5,53 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Aura Mezmo Playground</title>
 <style>
+  /* Dark theme (default -- matches the black-background reference slides
+     most closely). Brand green is used sparingly on purpose -- as a
+     success signal and a small active-tab accent, not as the dominant
+     UI color -- so it doesn't collide with the primary accent (blue/
+     periwinkle, kept from the original palette) or stop meaning
+     "succeeded" in the chat's tool-step disclosure. */
+  :root, html[data-theme="dark"] {
+    --bg: #0b0c0f;
+    --panel: #15171c;
+    --border: #262930;
+    --text: #eef0f2;
+    --muted: #8b909c;
+    --accent: #98a4ff;
+    --accent-dim: #262c52;
+    --accent-text: #10131a;
+    --danger: #ff6b6b;
+    --brand-green: #6fef3a;
+    --brand-green-dim: #1c3312;
+  }
+  /* Light theme -- matches the white-background reference slides. Same
+     roles, different values: accent flips to a deeper blue with white
+     text on top (a pale fill wouldn't have enough contrast on white),
+     and brand green is darkened for AA contrast on a white surface. */
+  html[data-theme="light"] {
+    --bg: #ffffff;
+    --panel: #f3f4f6;
+    --border: #d7dae0;
+    --text: #14161a;
+    /* muted/brand-green/danger tuned (not just eyeballed off the slide
+       swatches) to clear 4.5:1 contrast against BOTH --bg and --panel --
+       the original slide-matched values landed as low as 3.16:1 on
+       panel, which fails WCAG AA for normal-size text. */
+    --muted: #5a616f;
+    --accent: #5b63d8;
+    --accent-dim: #e8eaff;
+    --accent-text: #ffffff;
+    --danger: #bd3a3a;
+    --brand-green: #1e7a10;
+    --brand-green-dim: #e3f7dc;
+  }
   :root {
-    --bg: #0f1115;
-    --panel: #161a21;
-    --border: #262b34;
-    --text: #e6e8eb;
-    --muted: #9aa3af;
-    --accent: #7c9cff;
-    --accent-dim: #2a3a63;
-    --danger: #ff8080;
+    /* Chrome/labels only (nav, buttons, badges, table headers, timestamps) --
+       body copy (chat messages, descriptions, ticket text) intentionally
+       stays in the default sans below. Reference slides use a mono face
+       for short labels/data and a separate face for long-form text; going
+       mono everywhere hurts readability on anything longer than a label. */
+    --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   }
   * { box-sizing: border-box; }
   body {
@@ -23,6 +61,7 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     display: flex;
     height: 100vh;
+    transition: background 0.15s, color 0.15s;
   }
   nav {
     width: 220px;
@@ -30,8 +69,11 @@
     border-right: 1px solid var(--border);
     padding: 20px 12px;
     flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
   }
   nav h1 {
+    font-family: var(--font-mono);
     font-size: 15px;
     margin: 0 8px 20px;
     color: var(--text);
@@ -45,13 +87,29 @@
     margin-bottom: 4px;
     background: transparent;
     border: none;
+    border-left: 3px solid transparent;
     border-radius: 8px;
     color: var(--muted);
+    font-family: var(--font-mono);
     font-size: 14px;
     cursor: pointer;
   }
-  nav button:hover { background: #1d222b; color: var(--text); }
-  nav button.active { background: var(--accent-dim); color: var(--text); }
+  nav button:hover { background: var(--border); color: var(--text); }
+  nav button.active {
+    background: var(--accent-dim); color: var(--text);
+    /* Sparing brand-green touch: a thin accent bar, not a fill --
+       mirrors the thin colored rule lines above each icon column in the
+       reference slides, rather than making green the tab's whole color.
+       The border width is already reserved on every button above (as
+       "transparent"), so switching it to a real color here causes no
+       layout shift. */
+    border-left-color: var(--brand-green);
+  }
+  #theme-toggle {
+    margin-top: auto;
+    width: 100%;
+    text-align: center;
+  }
 
   main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .panel { flex: 1; overflow-y: auto; padding: 24px; display: none; }
@@ -62,30 +120,33 @@
   /* Chat */
   #chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
   .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.4; white-space: pre-wrap; }
-  .msg.user { align-self: flex-end; background: var(--accent); color: #10131a; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
   .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
 
   /* Reasoning/tool-step disclosure -- collapsed by default, distinct from
-     the final answer content that always renders below it. */
+     the final answer content that always renders below it. Mono here
+     reads like the technical trace it is (tool names, durations), same
+     spirit as the label typeface in the reference slides. */
   .steps { margin-bottom: 8px; }
   .steps-toggle {
     background: transparent; border: none; color: var(--muted); cursor: pointer;
-    padding: 0; font-size: 12px; text-decoration: underline dotted;
+    padding: 0; font-family: var(--font-mono); font-size: 12px; text-decoration: underline dotted;
   }
   .steps-toggle:hover { color: var(--text); }
   .steps-body {
     display: none; margin-top: 6px; padding: 8px 10px;
     border-left: 2px solid var(--border); color: var(--muted);
-    white-space: pre-wrap; font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
   }
   .steps-body.open { display: block; }
   .steps-body .step { margin-bottom: 6px; }
-  .steps-body .step.reasoning { color: var(--text); font-style: italic; }
-  .steps-body .step .tag {
-    display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px;
-    background: var(--accent-dim); color: var(--text); margin-right: 6px;
-  }
-  .stopped-tag { color: var(--danger); font-size: 11px; margin-left: 6px; font-style: italic; }
+  .steps-body .step.reasoning { color: var(--text); font-style: italic; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  /* Success/failure are the one place brand green gets used as a real
+     signal color, not just a rule/border accent -- and it's deliberately
+     scoped to just this word, not the whole line or a filled badge. */
+  .steps-body .step.success { color: var(--brand-green); }
+  .steps-body .step.failure { color: var(--danger); }
+  .stopped-tag { color: var(--danger); font-family: var(--font-mono); font-size: 11px; margin-left: 6px; font-style: italic; }
   .chat-input-row { display: flex; gap: 8px; margin-top: 16px; }
   .chat-input-row textarea {
     flex: 1; resize: none; min-height: 44px; max-height: 140px;
@@ -94,14 +155,15 @@
   }
 
   button.primary {
-    background: var(--accent); color: #10131a; border: none;
-    border-radius: 8px; padding: 10px 18px; font-size: 14px; cursor: pointer; font-weight: 600;
+    background: var(--accent); color: var(--accent-text); border: none;
+    border-radius: 8px; padding: 10px 18px; font-family: var(--font-mono);
+    font-size: 14px; cursor: pointer; font-weight: 600;
   }
   button.primary:disabled { opacity: 0.5; cursor: default; }
 
   /* Forms */
   .field { margin-bottom: 14px; }
-  .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .field label { display: block; font-family: var(--font-mono); font-size: 13px; color: var(--muted); margin-bottom: 6px; }
   .field input, .field select, .field textarea {
     width: 100%; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text); padding: 9px 12px; font-size: 14px;
@@ -112,14 +174,14 @@
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; }
+  th { color: var(--muted); font-family: var(--font-mono); font-weight: 500; }
   .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-family: var(--font-mono); font-size: 11px;
     background: var(--accent-dim); color: var(--text);
   }
   .small-btn {
     background: transparent; border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; margin-right: 6px;
+    border-radius: 6px; padding: 5px 10px; font-family: var(--font-mono); font-size: 12px; cursor: pointer; margin-right: 6px;
   }
   .error { color: var(--danger); font-size: 13px; margin-top: 8px; }
   .dropzone {
@@ -147,19 +209,20 @@
     padding: 14px; cursor: pointer;
   }
   .skill-card:hover { border-color: var(--accent); }
-  .skill-card .name { font-weight: 600; margin-bottom: 6px; }
+  .skill-card .name { font-family: var(--font-mono); font-weight: 600; margin-bottom: 6px; }
   .skill-card .desc {
     color: var(--muted); font-size: 13px; line-height: 1.4;
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
   }
+  .skill-card .byline { color: var(--muted); font-family: var(--font-mono); font-size: 11px; margin-top: 8px; }
   .skill-card.builtin .name::after {
     content: "built-in"; margin-left: 8px; font-size: 10px; font-weight: 400;
     color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 6px;
   }
-  textarea.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  textarea.mono { font-family: var(--font-mono); font-size: 13px; }
   .restart-banner {
     display: none; background: var(--accent-dim); border: 1px solid var(--accent);
-    border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px;
+    border-radius: 8px; padding: 10px 14px; font-family: var(--font-mono); font-size: 13px; margin-bottom: 12px;
   }
   .restart-banner.show { display: block; }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; }
@@ -174,6 +237,7 @@
   <button data-tab="live">Live Logs</button>
   <button data-tab="freshdesk">Freshdesk Bugs</button>
   <button data-tab="skills">Skills</button>
+  <button class="small-btn" id="theme-toggle">Dark mode</button>
 </nav>
 
 <main>
@@ -374,6 +438,19 @@ function showTab(name) {
 }
 tabs.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
+// ---------- Theme ----------
+const themeToggle = document.getElementById('theme-toggle');
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  themeToggle.textContent = theme === 'light' ? 'Light mode' : 'Dark mode';
+  localStorage.setItem('aura-theme', theme);
+}
+applyTheme(localStorage.getItem('aura-theme') || 'dark');
+themeToggle.addEventListener('click', () => {
+  const current = document.documentElement.getAttribute('data-theme');
+  applyTheme(current === 'light' ? 'dark' : 'light');
+});
+
 // ---------- Chat ----------
 const chatLog = document.getElementById('chat-log');
 const chatInput = document.getElementById('chat-input');
@@ -483,11 +560,12 @@ function handleSseLines(lines, msg, state) {
     if (eventType === 'aura.tool_requested') {
       msg.addStep('Calling ' + json.tool_name + '...', 'tool');
     } else if (eventType === 'aura.tool_complete') {
-      const outcome = json.success === false ? 'failed' : 'done';
+      const failed = json.success === false;
       msg.addStep(
-        json.tool_name + ' ' + outcome + ' (' + (json.duration_ms ?? '?') + 'ms)' +
-          (json.success === false && json.error ? ': ' + json.error : ''),
-        'tool'
+        json.tool_name + ' ' + (failed ? 'failed' : 'done') +
+          ' (' + (json.duration_ms ?? '?') + 'ms)' +
+          (failed && json.error ? ': ' + json.error : ''),
+        'tool ' + (failed ? 'failure' : 'success')
       );
     } else if (eventType === 'aura.reasoning') {
       if (!state.reasoningLine) state.reasoningLine = msg.addStep('', 'reasoning');
@@ -909,8 +987,8 @@ async function loadSkills() {
       '<div class="name">' + s.name + '</div>' +
       '<div class="desc">' + (s.description || '') + '</div>' +
       (s.author
-        ? '<div class="hint" style="margin:8px 0 0;">by ' + s.author + '</div>'
-        : '<div class="hint" style="margin:8px 0 0; font-style:italic;">no author set</div>');
+        ? '<div class="byline">by ' + s.author + '</div>'
+        : '<div class="byline" style="font-style:italic;">no author set</div>');
     card.addEventListener('click', () => openEditSkill(s.name));
     skillsList.appendChild(card);
   }
