@@ -60,8 +60,14 @@ figure:
 
 ```bash
 docker run --rm -v "${PWD}/experiments/mezmo-mcp-validate:/app" -w /app python:3.12-slim \
-  sh -c "pip install -q fastmcp && python3 validate_mezmo.py --query \"host:gen1-prod2\" --out-dir /app/out --key sts_..."
+  sh -c "pip install -q fastmcp && python3 validate_mezmo.py --query 'host:gen1-prod2' --out-dir /app/out --key sts_..."
 ```
+
+(Use single quotes around the query value, not `\"`-escaped double quotes -- PowerShell
+doesn't treat backslash as a quote-escape character, so `\"` passes through literally and
+breaks the shell script running inside the container. Single quotes inside a PowerShell
+double-quoted string are untouched and `sh` treats them as literal, which is what's needed
+once a query has a space in it, e.g. Query A below.)
 
 If a single host's dedup/RCA call *still* hits the "Query Too Large"
 ceiling even after halving the time window a few times, the full
