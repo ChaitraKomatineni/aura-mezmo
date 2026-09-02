@@ -1,2 +1,8 @@
+# drain3 is intentionally NOT listed here -- see Dockerfile.
+# It hard-pins cachetools==4.2.1, which conflicts with fastmcp's
+# transitive dependency on cachetools>=5.0.0 (via py-key-value-aio).
+# drain3 only uses cachetools.LRUCache/cachedmethod, both API-stable
+# across 4.x-7.x, so it's installed separately with --no-deps in the
+# Dockerfile and rides on whatever cachetools version fastmcp pulls in.
 fastmcp>=2.0.0
-drain3>=0.9.11
+jsonpickle==1.5.1

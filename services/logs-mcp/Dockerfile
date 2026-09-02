@@ -7,6 +7,12 @@ RUN apk add --no-cache curl
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# drain3 pins cachetools==4.2.1, which conflicts with fastmcp's own
+# cachetools>=5.0.0 requirement. drain3 only touches cachetools.LRUCache/
+# cachedmethod (API-stable across versions), so install it with --no-deps
+# and let it ride on whatever cachetools fastmcp already installed above.
+RUN pip install --no-cache-dir --no-deps "drain3>=0.9.11"
+
 COPY server.py .
 COPY template_mining.py .
 COPY drain3.ini .
