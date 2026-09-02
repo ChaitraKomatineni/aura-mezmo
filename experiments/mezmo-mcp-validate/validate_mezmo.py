@@ -96,6 +96,13 @@ MISSING_FIELD_RE = re.compile(r"missing field `([^`]+)`")
 ENUM_ERROR_RE = re.compile(r"unknown variant [`'\"]{0,2}[`'\"]?.*?expected one of ((?:[`'\"][^`'\"]+[`'\"],?\s*)+)", re.IGNORECASE)
 ENUM_VALUE_RE = re.compile(r"[`'\"]([^`'\"]+)[`'\"]")
 RELATIVE_TIME_PARSE_ERROR = "failed to parse relative time"
+# Mezmo's own documented behavior ("Query Protection for Large Log
+# Volumes"): a query matching too many lines is rejected outright with
+# this kind of message, regardless of whether the time value's FORMAT was
+# valid -- this is a volume problem, not a format problem, and must not
+# be treated the same as "try a different time format" (see call_adaptive).
+QUERY_TOO_LARGE_RE = re.compile(r"query too large|exceeds the maximum limit", re.IGNORECASE)
+FIRST_NUMBER_RE = re.compile(r"\d+")
 
 
 def is_time_field(name: str) -> bool:
@@ -126,11 +133,16 @@ def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, 
     if name in ("field", "group_by", "group_by_field", "by"):
         return field
     if "limit" in name:
-        return 20 if ptype == "integer" else "20"
+        return 20  # discovered live: group_logs_by_field rejects a string here ("invalid type: string, expected u32") -- always a real int
     if "aggregat" in name:
         return "count"  # discovered live: group_logs_by_field requires one of count/avg/max/min/sum/p75/p85/p95/p99
     if is_time_field(name):
-        return time_candidates(minutes)[0]
+        # Deliberately NOT pre-filled here. Leaving it out of the initial
+        # call makes the server itself raise "missing field", which drives
+        # call_adaptive's discovery loop starting cleanly at candidate
+        # index 0 -- pre-filling it here duplicated that same first guess
+        # instead of ever advancing past it (see call_adaptive's docstring).
+        return None
     if "minutes" in name:
         return minutes if ptype == "integer" else str(minutes)
     if "mode" in name:
@@ -188,7 +200,7 @@ def _result_error_text(mcp_result) -> str | None:
     return " ".join(t for t in texts if t).strip() or "(tool returned isError with no text content)"
 
 
-async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int, query: str, field: str, max_rounds: int = 8):
+async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int, query: str, field: str, max_rounds: int = 16):
     """Call a tool and retry on either failure shape MCP allows:
       - a protocol-level error (deserialize/validation failure) that
         raises before the tool runs -- e.g. "missing field `X`", and
@@ -204,16 +216,32 @@ async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int
     discover a multi-required-field schema). On an "unknown variant ...
     expected one of `a`, `b`, ..." enum-rejection message, replace
     whichever argument is currently an empty string with the first
-    suggested value. On any other failure, if a time-like field is
-    already set, assume it's the culprit (this is the case that catches
-    "Failed to parse relative time", which names no field) and cycle
-    through time_candidates() -- the correct value FORMAT for these
-    tools isn't documented, so a single guess isn't expected to be right.
+    suggested value.
+
+    On Mezmo's documented "Query Too Large" / "exceeds the maximum
+    limit" response, the time value's FORMAT was accepted (that's a
+    completely different failure mode from a parse error) -- so instead
+    of abandoning it for another format guess, halve whatever number is
+    in it and retry with the same shape, up to a few rounds. Getting this
+    distinction wrong is exactly what went wrong the first time this ran
+    for real: "last 30 minutes" got past parsing into this exact error,
+    and the old code treated ANY subsequent failure on a time field as
+    "try the next format guess," discarding the one that actually worked
+    in favor of worse ones.
+
+    On any other failure with no recognizable field name, if a time-like
+    field is already set, assume it's the culprit (this is the case that
+    catches "Failed to parse relative time") and cycle through
+    time_candidates() -- the correct value FORMAT for these tools isn't
+    documented, so a single guess isn't expected to be right on round one.
+
     Every round's arguments and outcome are recorded and returned either
-    way, so a wrong guess is diagnosable rather than silently swallowed
-    or, worse, mistaken for success."""
+    way, so a wrong guess -- or a right one that just needs narrowing --
+    is diagnosable rather than silently swallowed or mistaken for
+    failure."""
     args = dict(base_args)
     time_tries: dict[str, int] = {}
+    volume_halvings: dict[str, int] = {}
     attempts = []
 
     for round_no in range(max_rounds):
@@ -235,6 +263,25 @@ async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int
         m = MISSING_FIELD_RE.search(msg)
         if m:
             target = m.group(1)
+        elif QUERY_TOO_LARGE_RE.search(msg):
+            # The current time value's FORMAT was fine -- this is a volume
+            # problem, not a parse problem. Halve whatever number is in it
+            # and keep the same shape, rather than falling through to the
+            # generic time-format-cycling branch below (which would throw
+            # the working format away).
+            time_field = next((k for k in args if is_time_field(k)), None)
+            if time_field is not None:
+                halvings = volume_halvings.get(time_field, 0)
+                if halvings < 6:
+                    num_m = FIRST_NUMBER_RE.search(args[time_field])
+                    if num_m:
+                        current_n = int(num_m.group())
+                        new_n = max(1, current_n // 2)
+                        if new_n != current_n:
+                            args[time_field] = FIRST_NUMBER_RE.sub(str(new_n), args[time_field], count=1)
+                            volume_halvings[time_field] = halvings + 1
+                            continue
+            break  # no time field to narrow, out of halvings, or already at 1 -- report as final
         else:
             enum_m = ENUM_ERROR_RE.search(msg)
             if enum_m:
@@ -243,7 +290,7 @@ async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int
                 if options and empty_fields:
                     target, replacement = empty_fields[0], options[0]
 
-        if target is None:
+        if target is None and not QUERY_TOO_LARGE_RE.search(msg):
             # No explicit field name recoverable from the message (this is
             # the "Failed to parse relative time" case) -- if we already
             # set a time-like field, assume it's the culprit.
