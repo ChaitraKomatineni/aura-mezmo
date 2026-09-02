@@ -93,6 +93,9 @@ def find_tool(tools_schema: list[dict], candidates: list[str]) -> dict | None:
 
 TIME_FIELD_HINTS = ("since", "relative_time", "time_range", "range", "window")
 MISSING_FIELD_RE = re.compile(r"missing field `([^`]+)`")
+ENUM_ERROR_RE = re.compile(r"unknown variant [`'\"]{0,2}[`'\"]?.*?expected one of ((?:[`'\"][^`'\"]+[`'\"],?\s*)+)", re.IGNORECASE)
+ENUM_VALUE_RE = re.compile(r"[`'\"]([^`'\"]+)[`'\"]")
+RELATIVE_TIME_PARSE_ERROR = "failed to parse relative time"
 
 
 def is_time_field(name: str) -> bool:
@@ -124,6 +127,8 @@ def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, 
         return field
     if "limit" in name:
         return 20 if ptype == "integer" else "20"
+    if "aggregat" in name:
+        return "count"  # discovered live: group_logs_by_field requires one of count/avg/max/min/sum/p75/p85/p95/p99
     if is_time_field(name):
         return time_candidates(minutes)[0]
     if "minutes" in name:
@@ -166,51 +171,102 @@ def build_arguments(tool_schema: dict, *, minutes: int, query: str, field: str) 
     return args
 
 
+def _result_error_text(mcp_result) -> str | None:
+    """None if the call succeeded; the concatenated text content if the
+    server returned a normal CallToolResult with isError=true -- an
+    application-level failure (e.g. "Failed to parse relative time"),
+    distinct from a protocol-level deserialize error, which raises instead
+    of returning a result at all. Both need to feed the same retry logic
+    below, or one of the two failure shapes gets silently treated as
+    success (that's exactly what happened on the first real run here)."""
+    is_error = getattr(mcp_result, "is_error", None)
+    if is_error is None:
+        is_error = getattr(mcp_result, "isError", False)
+    if not is_error:
+        return None
+    texts = [getattr(b, "text", "") for b in (getattr(mcp_result, "content", None) or [])]
+    return " ".join(t for t in texts if t).strip() or "(tool returned isError with no text content)"
+
+
 async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int, query: str, field: str, max_rounds: int = 8):
-    """Call a tool, and on a "missing field `X`" deserialize error, fill in
-    a guess for X and retry -- serde-style errors report one missing field
-    at a time, so a single guessing pass isn't enough to discover a multi-
-    field required schema. For a field whose name looks time-related, cycle
-    through time_candidates() on repeated failures instead of giving up
-    after one guess, since the correct value FORMAT (not just field name)
-    is also unconfirmed. Every round's arguments and outcome are recorded
-    and returned, whether or not the call eventually succeeded, so a wrong
-    guess is diagnosable rather than silently swallowed."""
+    """Call a tool and retry on either failure shape MCP allows:
+      - a protocol-level error (deserialize/validation failure) that
+        raises before the tool runs -- e.g. "missing field `X`", and
+      - an application-level failure returned as a normal, successful
+        CallToolResult with isError=true and an explanatory text block
+        -- e.g. "Failed to parse relative time". The first real run
+        against this account hit exactly this case and was wrongly
+        recorded as a one-round success, since only the raise path was
+        being treated as retryable.
+
+    On a "missing field `X`" message, fill in a guess for X (serde-style
+    errors report one missing field at a time, so a single pass can't
+    discover a multi-required-field schema). On an "unknown variant ...
+    expected one of `a`, `b`, ..." enum-rejection message, replace
+    whichever argument is currently an empty string with the first
+    suggested value. On any other failure, if a time-like field is
+    already set, assume it's the culprit (this is the case that catches
+    "Failed to parse relative time", which names no field) and cycle
+    through time_candidates() -- the correct value FORMAT for these
+    tools isn't documented, so a single guess isn't expected to be right.
+    Every round's arguments and outcome are recorded and returned either
+    way, so a wrong guess is diagnosable rather than silently swallowed
+    or, worse, mistaken for success."""
     args = dict(base_args)
     time_tries: dict[str, int] = {}
     attempts = []
 
     for round_no in range(max_rounds):
+        msg = None
         try:
             result = await client.call_tool_mcp(tool_name, args)
-            attempts.append({"round": round_no, "arguments": dict(args), "outcome": "success"})
-            return result, args, attempts
+            msg = _result_error_text(result)
+            if msg is None:
+                attempts.append({"round": round_no, "arguments": dict(args), "outcome": "success"})
+                return result, args, attempts
         except Exception as exc:  # noqa: BLE001 -- diagnostic script, every failure mode is recorded, not swallowed
-            msg = str(exc)
-            attempts.append({"round": round_no, "arguments": dict(args), "outcome": "error", "error": msg})
+            msg = f"{type(exc).__name__}: {exc}"
 
-            m = MISSING_FIELD_RE.search(msg)
-            target = m.group(1) if m else None
-            if target is None:
-                # No explicit field name in the error -- if we already set a
-                # time-like field, assume it's the culprit and try the next
-                # candidate value for it before giving up.
-                target = next((k for k in args if is_time_field(k)), None)
+        attempts.append({"round": round_no, "arguments": dict(args), "outcome": "error", "error": msg})
 
-            if target is None:
-                break  # nothing left to adjust; stop and report this as the final error
+        target = None
+        replacement = None
 
-            if is_time_field(target):
-                tries = time_tries.get(target, -1) + 1
-                cands = time_candidates(minutes)
-                if tries >= len(cands):
-                    break  # exhausted every guess for this field
-                args[target] = cands[tries]
-                time_tries[target] = tries
-            elif target not in args:
-                args[target] = guess_value(target, {}, minutes=minutes, query=query, field=field)
-            else:
-                break  # already set this field and it's still wrong -- avoid looping forever
+        m = MISSING_FIELD_RE.search(msg)
+        if m:
+            target = m.group(1)
+        else:
+            enum_m = ENUM_ERROR_RE.search(msg)
+            if enum_m:
+                options = ENUM_VALUE_RE.findall(enum_m.group(1))
+                empty_fields = [k for k, v in args.items() if v == ""]
+                if options and empty_fields:
+                    target, replacement = empty_fields[0], options[0]
+
+        if target is None:
+            # No explicit field name recoverable from the message (this is
+            # the "Failed to parse relative time" case) -- if we already
+            # set a time-like field, assume it's the culprit.
+            target = next((k for k in args if is_time_field(k)), None)
+
+        if target is None:
+            break  # nothing left to adjust; stop and report this as the final error
+
+        if replacement is not None:
+            if args.get(target) == replacement:
+                break  # already tried this exact value; avoid looping forever
+            args[target] = replacement
+        elif is_time_field(target):
+            tries = time_tries.get(target, -1) + 1
+            cands = time_candidates(minutes)
+            if tries >= len(cands):
+                break  # exhausted every guess for this field
+            args[target] = cands[tries]
+            time_tries[target] = tries
+        elif target not in args:
+            args[target] = guess_value(target, {}, minutes=minutes, query=query, field=field)
+        else:
+            break  # already set this field and it's still wrong -- avoid looping forever
 
     return None, args, attempts
 
