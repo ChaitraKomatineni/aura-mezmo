@@ -46,7 +46,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -72,6 +72,13 @@ WANTED_TOOLS = {
     "histogram": ["get_log_histogram", "histogram"],
     "raw_export": ["export_logs", "search_logs", "export"],
     "correlated_timeline": ["get_correlated_timeline_relative_time", "correlated_timeline"],
+    # Absolute-time variants -- an actual past slice (e.g. "2 hours ago to
+    # 1 hour ago"), as opposed to the _relative_time tools above (always
+    # relative to right now). find_tool() matches these exactly before
+    # falling back to substring search, so these resolve to the _time_range
+    # tool specifically rather than colliding with the _relative_time one.
+    "dedup_time_range": ["deduplicate_logs_time_range"],
+    "root_cause_time_range": ["analyze_logs_for_root_cause_time_range"],
 }
 
 
@@ -110,9 +117,31 @@ FIRST_NUMBER_RE = re.compile(r"\d+")
 TRANSIENT_ERROR_RE = re.compile(r"sse stream ended without a response|embedding step failed|failed to create .*embeddings", re.IGNORECASE)
 
 
+ABS_START_HINTS = ("from", "start")
+ABS_END_HINTS = ("to", "end", "until")
+
+
 def is_time_field(name: str) -> bool:
     n = name.lower()
     return any(h in n for h in TIME_FIELD_HINTS)
+
+
+def classify_time_field(name: str) -> str | None:
+    """Which kind of time value a field name looks like -- "relative"
+    (since/relative_time/etc, always relative to now), "abs_start" or
+    "abs_end" (an absolute _time_range tool's two boundary fields), or
+    None if it doesn't look time-related at all. The exact field names
+    for the absolute tools aren't documented any more than the relative
+    ones are -- this is a guess based on common naming, corrected the
+    same way as everything else here: via live "missing field" errors."""
+    n = name.lower()
+    if any(h in n for h in ABS_START_HINTS):
+        return "abs_start"
+    if any(h in n for h in ABS_END_HINTS):
+        return "abs_end"
+    if is_time_field(name):
+        return "relative"
+    return None
 
 
 def time_candidates(minutes: int) -> list[str]:
@@ -123,6 +152,35 @@ def time_candidates(minutes: int) -> list[str]:
     error and records every attempt rather than asserting the first guess
     is correct."""
     return [f"{minutes}m", f"last {minutes} minutes", f"-{minutes}m", f"PT{minutes}M", str(minutes)]
+
+
+def abs_time_candidates(hours_ago: float) -> list[str]:
+    """Ordered guesses for an absolute time-boundary field's value
+    format, anchored to a point `hours_ago` hours before now. The first
+    candidate matches the exact string shape Mezmo's own get_log_histogram
+    response used for its (confusingly named, given it's a string not a
+    number) "from_ms"/"to_ms" fields -- e.g. "2026-09-02T12:00:00.000Z" --
+    the best evidence available for what an absolute-time field expects,
+    short of it being documented anywhere."""
+    dt = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    epoch_ms = int(dt.timestamp() * 1000)
+    return [
+        dt.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        str(epoch_ms),
+        epoch_ms,
+        str(int(dt.timestamp())),
+    ]
+
+
+def candidates_for(kind: str, *, minutes: int, abs_start_hours_ago: float, abs_end_hours_ago: float) -> list:
+    if kind == "relative":
+        return time_candidates(minutes)
+    if kind == "abs_start":
+        return abs_time_candidates(abs_start_hours_ago)
+    if kind == "abs_end":
+        return abs_time_candidates(abs_end_hours_ago)
+    return []
 
 
 def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, field: str):
@@ -141,7 +199,7 @@ def guess_value(prop_name: str, prop_schema: dict, *, minutes: int, query: str, 
         return 20  # discovered live: group_logs_by_field rejects a string here ("invalid type: string, expected u32") -- always a real int
     if "aggregat" in name:
         return "count"  # discovered live: group_logs_by_field requires one of count/avg/max/min/sum/p75/p85/p95/p99
-    if is_time_field(name):
+    if classify_time_field(name) is not None:
         # Deliberately NOT pre-filled here. Leaving it out of the initial
         # call makes the server itself raise "missing field", which drives
         # call_adaptive's discovery loop starting cleanly at candidate
@@ -205,7 +263,8 @@ def _result_error_text(mcp_result) -> str | None:
     return " ".join(t for t in texts if t).strip() or "(tool returned isError with no text content)"
 
 
-async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int, query: str, field: str, max_rounds: int = 16):
+async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int, query: str, field: str,
+                         abs_start_hours_ago: float = 2.0, abs_end_hours_ago: float = 1.0, max_rounds: int = 16):
     """Call a tool and retry on either failure shape MCP allows:
       - a protocol-level error (deserialize/validation failure) that
         raises before the tool runs -- e.g. "missing field `X`", and
@@ -322,9 +381,12 @@ async def call_adaptive(client, tool_name: str, base_args: dict, *, minutes: int
             if args.get(target) == replacement:
                 break  # already tried this exact value; avoid looping forever
             args[target] = replacement
-        elif is_time_field(target):
+        elif classify_time_field(target) is not None:
             tries = time_tries.get(target, -1) + 1
-            cands = time_candidates(minutes)
+            cands = candidates_for(
+                classify_time_field(target), minutes=minutes,
+                abs_start_hours_ago=abs_start_hours_ago, abs_end_hours_ago=abs_end_hours_ago,
+            )
             if tries >= len(cands):
                 break  # exhausted every guess for this field
             args[target] = cands[tries]
@@ -381,7 +443,10 @@ async def run(args) -> dict:
 
     report = {
         "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "params": {"minutes": args.minutes, "query": args.query, "field": args.field},
+        "params": {
+            "minutes": args.minutes, "query": args.query, "field": args.field,
+            "abs_start_hours_ago": args.abs_start_hours_ago, "abs_end_hours_ago": args.abs_end_hours_ago,
+        },
         "tools_discovered": [],
         "tools_schema": [],
         "calls": [],
@@ -412,6 +477,7 @@ async def run(args) -> dict:
             mcp_result, final_args, attempts = await call_adaptive(
                 client, tool["name"], base_args,
                 minutes=args.minutes, query=args.query, field=args.field,
+                abs_start_hours_ago=args.abs_start_hours_ago, abs_end_hours_ago=args.abs_end_hours_ago,
             )
             entry["arguments_sent"] = final_args
             entry["attempts"] = attempts
@@ -460,7 +526,9 @@ def render_html(report: dict) -> str:
         "</style>",
         "<h1>Mezmo MCP validation report</h1>",
         f"<div class='meta'>Run at {esc(report['run_at'])} &middot; "
-        f"window: last {report['params']['minutes']} minutes &middot; "
+        f"relative window: last {report['params']['minutes']} minutes &middot; "
+        f"absolute window: {report['params'].get('abs_start_hours_ago', '?')}h ago to "
+        f"{report['params'].get('abs_end_hours_ago', '?')}h ago (for the _time_range tools) &middot; "
         f"query: <code>{esc(report['params']['query'] or '(broad, no filter)')}</code> &middot; "
         f"field: <code>{esc(report['params']['field'])}</code></div>",
         "<div class='card'><b>Tools discovered on this account:</b><br>"
@@ -536,6 +604,10 @@ def main():
     parser.add_argument("--minutes", type=int, default=30, help="relative time window in minutes (default 30)")
     parser.add_argument("--query", default="", help="Mezmo fielded query, e.g. 'app:checkout-service' (default: broad, no filter)")
     parser.add_argument("--field", default="app", help="field to group/dedup by where applicable (default: app)")
+    parser.add_argument("--abs-start-hours-ago", type=float, default=2.0,
+                         help="for the _time_range (absolute) tools only: start of the window, in hours before now (default 2.0)")
+    parser.add_argument("--abs-end-hours-ago", type=float, default=1.0,
+                         help="for the _time_range (absolute) tools only: end of the window, in hours before now (default 1.0 -- so the default window is '2 hours ago to 1 hour ago')")
     parser.add_argument("--key", default=None, help="Mezmo API key; defaults to $MEZMO_API_KEY")
     parser.add_argument("--out-dir", default=".", help="directory to write output files into")
     args = parser.parse_args()
