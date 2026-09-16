@@ -25,7 +25,7 @@ Open **http://localhost:3000** for the control panel.
 | Env var | Required for | Notes |
 |---|---|---|
 | `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL` | the agent to run at all | any provider Aura supports (anthropic, openai, bedrock, ...) |
-| `MEZMO_API_KEY` | the "Live Logs" tab | Mezmo's hosted MCP server; omit and that tab's queries will just report no access |
+| `MEZMO_API_KEY` | the "Live Logs" tab | goes to the `mezmo-proxy` container only, never to `aura`; omit and the proxy refuses to start |
 | `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY` | the "Freshdesk Bugs" tab | domain is the subdomain, e.g. `acme` for `acme.freshdesk.com` |
 
 Everything works without Mezmo/Freshdesk credentials except those tabs — the chat, log-upload, and skills flows run standalone.
@@ -34,7 +34,14 @@ Everything works without Mezmo/Freshdesk credentials except those tabs — the c
 
 **Upload logs + chat, with slice inspection.** The "Upload Logs" tab drops a file into a shared volume; `logs-mcp` immediately exposes it to the agent. Each file has two actions: "Quick scan" (canned full-file error/anomaly analysis) and "Inspect a slice..." — a small form where you type a specific question and, optionally, a line range (start + count). It asks Aura to read exactly that slice (via `logs_read_log`'s offset/limit) rather than the whole file, and answer only your question, quoting the matching lines.
 
-**Live logs.** The "Live Logs" tab builds a natural-language query ("search Mezmo for ERROR logs from checkout-service over the last hour...") and sends it to the agent, which resolves it against the real Mezmo MCP server (`https://mcp.mezmo.com/mcp`) using `MEZMO_API_KEY`.
+**Live logs, production only.** The "Live Logs" tab builds a natural-language query ("search Mezmo for ERROR logs from checkout-service over the last hour...") and sends it to the agent, which resolves it against `mezmo-proxy` — not against `https://mcp.mezmo.com/mcp` directly.
+
+`mezmo-proxy` (`services/mezmo-proxy`) is a read-only gateway in front of Mezmo's hosted MCP server, and it enforces two things in Python that neither the system prompt nor the agent can relax:
+
+- **Production only.** Every query gets `host:gen1-prod -level:debug` AND-ed onto it before it leaves the network. Asking for a dev robot (`gen1-dev*`), a prototype (`gen1-proto*`), or any non-`gen1` host returns an explicit out-of-scope error. Dropping DEBUG removes ~80% of line volume (measured: 9,166,715 → 1,778,362 lines over an 8-hour fleet-wide window).
+- **Read only.** Mezmo exposes 32 tools on this account; the proxy re-exposes 9. The ~20 pipeline mutators (`create_pipeline`, `pause_pipeline`, `delete_pipeline_component`, `create_pipeline_access_key`, ...) plus `tap_pipeline_component` are not merely refused — they aren't on the tool list the agent sees, so nothing here can change existing pipelines.
+
+`MEZMO_API_KEY` is deliberately blanked in the `aura` container and given only to the proxy; otherwise the agent could reach Mezmo directly and both guarantees above would be advisory. Tool names, descriptions and input schemas are discovered live from Mezmo at startup and re-exposed verbatim, so Mezmo's query-syntax documentation still reaches the agent intact.
 
 **Freshdesk correlation, filtered from the ticket itself.** The "Freshdesk Bugs" tab loads automatically with every ticket from the last 2 days (change the dropdown for 1/7/30 days, or use the search box instead). Click "View" on any row to expand its full description, tags, and timestamps inline — no separate tool needed to read a ticket. Click "Correlate with logs" and, before asking Aura anything, the UI fetches the ticket's full details and prefills an editable filter panel: a service/keyword guess (from the subject), a time window (±30 min around when the ticket was created), and a log-level filter. Adjust anything, then "Run correlation" — the prompt sent to Aura includes the ticket description plus those exact filters, and `config/aura.toml`'s system prompt instructs the agent to treat them as hard constraints rather than re-guessing its own.
 

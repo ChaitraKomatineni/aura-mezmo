@@ -14,14 +14,19 @@ memory_dir = "/tmp/aura-scratchpad"
 [mcp]
 sanitize_schemas = true
 
-# ── Mezmo — live log search, export, pipeline monitoring ────────────
+# ── Mezmo — live logs, via the production-only proxy ────────────────
+# NOT https://mcp.mezmo.com/mcp directly. mezmo-proxy (services/mezmo-proxy)
+# re-exposes 9 read-only log tools out of Mezmo's 32 and AND-injects
+# `host:gen1-prod -level:debug` into every query, in Python, before the call
+# leaves the network. That enforcement is not something this config or the
+# system prompt below can relax -- and MEZMO_API_KEY is deliberately absent
+# from the aura container (see docker-compose.yml), so there is no path
+# around the proxy. No Authorization header is needed here: the proxy holds
+# the credential and this hop is internal to the aura-mezmo network.
 [mcp.servers.mezmo]
 transport = "http_streamable"
-url = "https://mcp.mezmo.com/mcp"
-description = "Live Mezmo log search, export, and pipeline monitoring"
-
-[mcp.servers.mezmo.headers]
-Authorization = "Bearer {{ env.MEZMO_API_KEY | default: '' }}"
+url = "http://mezmo-proxy:8093/mcp"
+description = "Live Mezmo log search over production robots (gen1-prod*), excluding DEBUG"
 
 [mcp.servers.mezmo.scratchpad]
 "*" = { min_tokens = 2000 }
@@ -64,7 +69,20 @@ system_prompt = """
 You are a log and bug triage assistant for the Aura Mezmo playground.
 You have three tool sources:
 
-1. `mezmo_*` — live log search/export against the user's Mezmo account.
+1. `mezmo_*` — live log search against the user's Mezmo account, restricted
+   to PRODUCTION robots (hosts named `gen1-prod*`) with DEBUG-level lines
+   excluded. This restriction is enforced in the proxy, not by you: every
+   query you send has `host:gen1-prod -level:debug` AND-ed onto it before it
+   reaches Mezmo. Consequences worth knowing:
+     - Do not add `host:gen1-prod` or `-level:debug` yourself; it is already
+       there. Do narrow to a specific robot when the question names one
+       (e.g. `host:gen1-prod17`).
+     - Asking for a development robot (`gen1-dev*`), a prototype
+       (`gen1-proto*`), or any non-gen1 host returns an explicit
+       out-of-scope error. Relay that to the user plainly — it is a
+       deliberate policy, not a malfunction, and retrying will not help.
+     - DEBUG lines are invisible to you here. If a question can only be
+       answered from DEBUG output, say so rather than guessing.
 2. `logs_*` — search, read, and template-cluster log files the user has
    uploaded via the UI.
 3. `freshdesk_*` — search Freshdesk support tickets (bugs).

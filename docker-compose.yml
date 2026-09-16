@@ -8,7 +8,12 @@ services:
       - ./aura-web-server
       - --verbose
     ports:
-      - "8080:8080"
+      # Host 8081, not 8080: the separate `aura` quickstart stack (compose
+      # project "aura", /home/chaitra/aura) binds host 8080 with
+      # restart: unless-stopped, so this container could never come up.
+      # Only the host side moves -- in-cluster clients still use
+      # http://aura:8080 over the aura-mezmo network (see web's AURA_BASE_URL).
+      - "8081:8080"
     env_file: .env
     environment:
       HOST: "0.0.0.0"
@@ -32,6 +37,14 @@ services:
       AURA_CUSTOM_EVENTS: "true"
       AURA_EMIT_REASONING: "true"
       TOOL_RESULT_MODE: "aura"
+
+      # Blanked deliberately, overriding the value env_file pulls in from
+      # .env. Aura must NOT hold the Mezmo credential: it now reaches Mezmo
+      # only through mezmo-proxy, which enforces the production-only scope
+      # and the read-only tool allowlist. If Aura kept the key it could
+      # connect to mcp.mezmo.com directly and that enforcement would be
+      # advisory rather than actual. mezmo-proxy holds the key instead.
+      MEZMO_API_KEY: ""
     volumes:
       - ./config/aura.toml:/app/config/aura.toml:ro
       - ./config/skills:/app/skills:ro
@@ -39,6 +52,8 @@ services:
       logs-mcp:
         condition: service_healthy
       freshdesk-mcp:
+        condition: service_healthy
+      mezmo-proxy:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -75,6 +90,43 @@ services:
     networks:
       - aura-mezmo
 
+  # ── Mezmo proxy — production-only, read-only gateway to mcp.mezmo.com ─
+  # Aura points at this instead of at https://mcp.mezmo.com/mcp (see
+  # config/aura.toml). It re-exposes 9 read-only log tools out of the 32
+  # Mezmo offers, and AND-injects `host:gen1-prod -level:debug` into every
+  # query. It is the only container that gets MEZMO_API_KEY.
+  mezmo-proxy:
+    build: ./services/mezmo-proxy
+    container_name: aura-mezmo-proxy
+    ports:
+      - "8093:8093"
+    environment:
+      # The only container that receives the Mezmo credential. Passed
+      # explicitly rather than via `env_file: .env` so the proxy doesn't
+      # also inherit LLM_API_KEY / FRESHDESK_API_KEY, which it has no use
+      # for. Compose fails fast if it isn't set.
+      MEZMO_API_KEY: "${MEZMO_API_KEY:?MEZMO_API_KEY must be set in .env}"
+
+      # error | warn | off — what to do if a response carries a structural
+      # `host` field outside the production scope. See server.py.
+      TRIPWIRE_MODE: "error"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -sf http://localhost:8093/mcp -X POST
+          -H "Content-Type: application/json"
+          -H "Accept: application/json, text/event-stream"
+          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
+          > /dev/null || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - aura-mezmo
+
   # ── Freshdesk tool server ────────────────────────────────────────────
   freshdesk-mcp:
     build: ./services/freshdesk-mcp
@@ -82,6 +134,11 @@ services:
     ports:
       - "8092:8092"
     env_file: .env
+    environment:
+      # Blanked for the same reason as on `aura` and `web`: env_file pulls
+      # in the whole .env and this container has no use for the Mezmo
+      # credential. Only mezmo-proxy should hold it.
+      MEZMO_API_KEY: ""
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -110,6 +167,11 @@ services:
       AURA_BASE_URL: "http://aura:8080"
       UPLOAD_DIR: "/data/uploads"
       SKILLS_DIR: "/app/skills"
+
+      # Blanked for the same reason as on `aura`: env_file pulls in the
+      # whole .env, and this container has no use for the Mezmo credential.
+      # Only mezmo-proxy should hold it.
+      MEZMO_API_KEY: ""
     volumes:
       - logs-data:/data/uploads
       # Read-write, unlike Aura's own read-only mount of the same host
