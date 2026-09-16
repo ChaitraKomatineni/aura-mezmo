@@ -11,7 +11,8 @@ cannot argue its way around:
      does not exist from Aura's point of view.
   2. A PRODUCTION-ONLY SCOPE. Every query is rewritten to AND in
      `host:gen1-prod`, so only production robots are ever searched, plus
-     `-level:debug` to drop DEBUG noise (~80% of line volume, measured).
+     two noise filters: `-level:debug` (~80% of line volume, measured) and
+     suppression of INFO from the two highest-volume apps (a further ~50%).
   3. A RESPONSE TRIPWIRE. Responses are checked for structural `host`
      fields outside scope, in case an upstream tool ever ignores `query`.
 
@@ -55,11 +56,59 @@ PORT = int(os.environ.get("PORT", "8093"))
 # form and already matches every gen1-prod* host.
 PROD_HOST_PREFIX = "gen1-prod"
 
+# Apps whose INFO-level chatter is suppressed. These two are the fleet's
+# highest-volume talkers and their INFO lines are routine loop telemetry,
+# not events worth an agent's context. Measured over a pinned 8h window:
+#   fastloop         INFO 5,095,097 of 5,098,577 non-debug lines (99.93%)
+#   pickle_rosbridge INFO   784,153 of 1,506,263 non-debug lines (52.1%)
+#
+# NOTE the consequence for fastloop: because essentially all of its
+# non-debug output is INFO, suppressing INFO removes fastloop from the
+# agent's view almost entirely (3,480 lines survive in that window). The
+# system prompt in config/aura.toml says so explicitly, so the agent
+# reports "fastloop's routine logging is filtered out here" instead of
+# concluding fastloop was idle.
+#
+# Matching is by prefix (Mezmo does this automatically), so `app:fastloop`
+# would also catch a future `fastloop2`. There is no fastloop2 in
+# production today -- `host:gen1-prod app:fastloop2` returns 0 -- but if one
+# ships, it inherits this suppression without anyone deciding that.
+INFO_SUPPRESSED_APPS = ("fastloop", "pickle_rosbridge")
+
+
+def _info_noise_clause(apps: tuple[str, ...]) -> str:
+    """`-(level:info (app:a OR app:b))` -- exclude INFO, but only from these
+    apps; their WARN/ERROR/FATAL lines are still returned.
+
+    Negating a *group* isn't something Mezmo documents (its docs promise `-`
+    on a term, phrase, or field filter only), so this was verified against
+    the live account rather than assumed. On a pinned 8h window the baseline
+    was 11,825,178 lines and the INFO to be removed 5,879,250; this clause
+    returned exactly 5,945,928 = the difference. Three other formulations
+    -- two flat `-(level:info app:X)` clauses, and the De Morgan
+    `(-level:info OR (-app:X -app:Y))` form -- returned the identical count,
+    so the grouped version is chosen for being the one that scales cleanly
+    as apps are added to the tuple above.
+    """
+    if not apps:
+        return ""
+    return "-(level:info (" + " OR ".join(f"app:{a}" for a in apps) + "))"
+
+
 # AND-ed into every query. Order is irrelevant (whitespace is AND in Mezmo's
-# syntax); both clauses were verified live against get_log_histogram:
-#   host:gen1-prod                  -> 9,166,715 lines / 8h
-#   host:gen1-prod -level:debug     -> 1,778,362 lines / 8h  (-80.6%)
-SCOPE_CLAUSE = f"host:{PROD_HOST_PREFIX} -level:debug"
+# syntax). Each clause verified live against get_log_histogram:
+#   host:gen1-prod                        -> 9,166,715 lines / 8h
+#   host:gen1-prod -level:debug           -> 1,778,362 lines / 8h  (-80.6%)
+#   ... plus the INFO-noise clause        -> a further -49.7%
+SCOPE_CLAUSE = " ".join(
+    part
+    for part in (
+        f"host:{PROD_HOST_PREFIX}",
+        "-level:debug",
+        _info_noise_clause(INFO_SUPPRESSED_APPS),
+    )
+    if part
+)
 
 # Tools that read log data. Each MUST declare a `query` parameter -- that's
 # the only channel the scope can be injected through, so a tool listed here

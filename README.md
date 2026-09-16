@@ -38,7 +38,14 @@ Everything works without Mezmo/Freshdesk credentials except those tabs — the c
 
 `mezmo-proxy` (`services/mezmo-proxy`) is a read-only gateway in front of Mezmo's hosted MCP server, and it enforces two things in Python that neither the system prompt nor the agent can relax:
 
-- **Production only.** Every query gets `host:gen1-prod -level:debug` AND-ed onto it before it leaves the network. Asking for a dev robot (`gen1-dev*`), a prototype (`gen1-proto*`), or any non-`gen1` host returns an explicit out-of-scope error. Dropping DEBUG removes ~80% of line volume (measured: 9,166,715 → 1,778,362 lines over an 8-hour fleet-wide window).
+- **Production only.** Asking for a dev robot (`gen1-dev*`), a prototype (`gen1-proto*`), or any non-`gen1` host returns an explicit out-of-scope error.
+- **Noise filtered.** Every query gets this AND-ed onto it before it leaves the network:
+
+  ```
+  host:gen1-prod -level:debug -(level:info (app:fastloop OR app:pickle_rosbridge))
+  ```
+
+  Dropping DEBUG removes ~80% of line volume (9,166,715 → 1,778,362 over an 8h fleet-wide window). Suppressing INFO from the two highest-volume apps removes a further ~50% (11,825,178 → 5,945,928 on a pinned 8h window). Note the side effect: ~99.9% of `fastloop`'s non-DEBUG output is INFO, so fastloop is almost entirely absent from the agent's view — the system prompt tells it to say so rather than conclude fastloop was idle.
 - **Read only.** Mezmo exposes 32 tools on this account; the proxy re-exposes 9. The ~20 pipeline mutators (`create_pipeline`, `pause_pipeline`, `delete_pipeline_component`, `create_pipeline_access_key`, ...) plus `tap_pipeline_component` are not merely refused — they aren't on the tool list the agent sees, so nothing here can change existing pipelines.
 
 `MEZMO_API_KEY` is deliberately blanked in the `aura` container and given only to the proxy; otherwise the agent could reach Mezmo directly and both guarantees above would be advisory. Tool names, descriptions and input schemas are discovered live from Mezmo at startup and re-exposed verbatim, so Mezmo's query-syntax documentation still reaches the agent intact.
