@@ -100,13 +100,19 @@ ERROR_SIGNATURES = [
      "SCHEMA_MISSING_FIELD", "application",
      "Required parameter absent. serde reports ONE field at a time, so a "
      "multi-required-field schema needs several round trips to discover."),
-    (r"unknown variant .*expected one of",
+    (r"unknown variant .*expected",
      "SCHEMA_BAD_ENUM", "application",
      "Value not in the allowed set; the message lists the valid options. "
-     "Observed for aggregation: count, avg, max, min, sum, p75, p85, p95, p99."),
+     "Observed: aggregation is count/avg/max/min/sum/p75/p85/p95/p99, but "
+     "dedup_mode is only `none` or `template` -- NOT `exact`, despite the "
+     "schema leaving dedup_mode untyped."),
     (r"invalid type: \w+ .*expected",
      "SCHEMA_BAD_TYPE", "application",
-     'Wrong JSON type, e.g. limit as the string "20" when u32 is required.'),
+     'Wrong JSON type. Two distinct causes seen: limit as the string "20" '
+     "when u32 is required; and -- the one that will catch you -- every "
+     'aggregation EXCEPT count must be an object naming a field, e.g. '
+     '{"avg": "latency_ms"}. Passing bare "avg" is a type error, even '
+     'though bare "count" is accepted.'),
     (r"invalid value: .*expected",
      "SCHEMA_BAD_VALUE", "application",
      "Right type, impossible value -- e.g. limit: -5 against u32."),
@@ -386,11 +392,91 @@ def group_errors(q, start, end):
     ]
 
 
+def group_volume(q, start, end):
+    """How big a window can each tool actually take before the 1,000,000
+    line cap rejects it? Windows all END at `end` and grow backwards, so
+    every rung sees the same (populated) tail of data."""
+    rungs = [1, 2, 5, 10, 20, 60, 240]
+    capped = [
+        ("dedup", "deduplicate_logs_time_range", {}),
+        ("root_cause", "analyze_logs_for_root_cause_time_range", {}),
+        ("timeline", "get_correlated_timeline_time_range", {}),
+        # Not believed to be capped -- included to prove the contrast.
+        ("histogram", "get_log_histogram", {"granularity": "1m"}),
+        ("group_by", "group_logs_by_field", {"field": "host", "aggregation": "count"}),
+    ]
+    probes = []
+    for minutes in rungs:
+        w_start = end - timedelta(minutes=minutes)
+        w = {"from_time": w_start.strftime(RFC3339), "to_time": end.strftime(RFC3339)}
+        for name, tool, extra in capped:
+            probes.append((f"{name} @ {minutes}min", tool,
+                           {"query": q, **extra, **w}, (w_start, end)))
+    return probes
+
+
+def group_matrix(q, start, end):
+    """Sweep each tool's own parameters, so the report can say what every
+    knob actually does. Windows are kept small to stay under the volume cap
+    where the tool is subject to it."""
+    tight_start = end - timedelta(minutes=2)
+    tight = {"from_time": tight_start.strftime(RFC3339), "to_time": end.strftime(RFC3339)}
+    w = {"from_time": start.strftime(RFC3339), "to_time": end.strftime(RFC3339)}
+    probes = []
+
+    # group_logs_by_field: every aggregation, several fields, limit behaviour
+    for agg in ("count", "avg", "max", "min", "sum", "p95"):
+        args = {"query": q, "field": "app", "aggregation": agg, **w}
+        probes.append((f"aggregation={agg}", "group_logs_by_field", args, (start, end)))
+    for field in ("host", "app", "level", "_app", "pod"):
+        probes.append((f"field={field}", "group_logs_by_field",
+                       {"query": q, "field": field, "aggregation": "count", **w}, (start, end)))
+    for lim in (0, 1, 5, 1000):
+        probes.append((f"limit={lim}", "group_logs_by_field",
+                       {"query": q, "field": "app", "aggregation": "count",
+                        "limit": lim, **w}, (start, end)))
+
+    # get_log_histogram: chart flag, and defaults when times omitted
+    probes.append(("include_chart=true", "get_log_histogram",
+                   {"query": q, "granularity": "5m", "include_chart": True, **w}, (start, end)))
+    probes.append(("no from/to (defaults)", "get_log_histogram",
+                   {"query": q, "granularity": "5m"}, None))
+
+    # correlated timeline: grouping field, dedup mode, the two caps
+    for gf in ("_app", "_host", "app"):
+        probes.append((f"grouping_field={gf}", "get_correlated_timeline_time_range",
+                       {"query": q, "grouping_field": gf, "max_logs_per_source": 3, **tight},
+                       (tight_start, end)))
+    for mode in ("template", "exact", "none"):
+        probes.append((f"dedup_mode={mode}", "get_correlated_timeline_time_range",
+                       {"query": q, "dedup_mode": mode, "max_logs_per_source": 3, **tight},
+                       (tight_start, end)))
+    for n in (1, 5, 100):
+        probes.append((f"max_logs_per_source={n}", "get_correlated_timeline_time_range",
+                       {"query": q, "max_logs_per_source": n, **tight}, (tight_start, end)))
+
+    # root cause: does incident_description change anything?
+    probes.append(("root_cause plain", "analyze_logs_for_root_cause_time_range",
+                   {"query": q, **tight}, (tight_start, end)))
+    probes.append(("root_cause w/ description", "analyze_logs_for_root_cause_time_range",
+                   {"query": q, "incident_description": "conveyor stopped unexpectedly",
+                    **tight}, (tight_start, end)))
+
+    # dedup, both time flavours, on a window small enough to pass
+    probes.append(("dedup time_range tight", "deduplicate_logs_time_range",
+                   {"query": q, **tight}, (tight_start, end)))
+    probes.append(("dedup relative", "deduplicate_logs_relative_time",
+                   {"query": q, "since": "last 2 minutes"}, None))
+    return probes
+
+
 GROUPS = {
     "window": ("Does each tool honour the requested time window?", group_window),
     "granularity": ("Does explicit granularity stop histogram window inflation?", group_granularity),
     "relative": ("Which `since` spellings parse?", group_relative),
     "errors": ("Provoke and label every reachable failure mode", group_errors),
+    "volume": ("How large a window does each tool accept before the 1M cap?", group_volume),
+    "matrix": ("Sweep every tool's own parameters", group_matrix),
 }
 
 
@@ -509,8 +595,20 @@ async def main():
     transport = StreamableHttpTransport(url=MEZMO_URL,
                                         headers={"Authorization": f"Bearer {key}"})
     records = []
+    schemas = {}
     async with Client(transport) as client:
-        live = {t.name for t in await client.list_tools()}
+        live_tools = await client.list_tools()
+        live = {t.name for t in live_tools}
+        # Captured so make_report.py can document each tool's real
+        # description, parameters, defaults and enums without a second
+        # network round trip.
+        for t in live_tools:
+            if t.name in LOG_TOOLS:
+                schemas[t.name] = {
+                    "description": t.description,
+                    "input_schema": (getattr(t, "input_schema", None)
+                                     or getattr(t, "inputSchema", None) or {}),
+                }
         missing = [t for t in LOG_TOOLS if t not in live]
         if missing:
             print(f"NOTE: not available on this account/endpoint: {missing}")
@@ -539,7 +637,8 @@ async def main():
     path.write_text(json.dumps(
         {"run_at": stamp, "url": MEZMO_URL, "query": args.query,
          "window": [start.strftime(RFC3339), end.strftime(RFC3339)],
-         "groups": chosen, "records": records}, indent=2, default=str))
+         "groups": chosen, "schemas": schemas, "records": records},
+        indent=2, default=str))
     print(f"\nrecords written to {path}")
     return 0
 
