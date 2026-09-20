@@ -7,3 +7,8 @@ __pycache__/
 experiments/mezmo-mcp-validate/out/
 mezmo_raw_output_*.json
 mezmo_report_*.html
+
+# Same rule for the behaviour probe -- its records carry real host names,
+# field names and line counts from the live account.
+experiments/mcp-tool-behavior/out/
+tool_behavior_*.json
