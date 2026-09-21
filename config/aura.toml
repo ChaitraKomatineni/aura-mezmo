@@ -56,6 +56,15 @@ description = "Search, read, and template-cluster log files uploaded through the
 [mcp.servers.logs.scratchpad]
 "*" = { min_tokens = 2000 }
 
+# ── Fleet status — live robot presence and site/customer directory ───
+# Reads the ROC dashboard (robot-operations-center) over the Tailnet. This
+# is the missing half of log triage: Mezmo cannot distinguish "nothing
+# happened" from "the robot was switched off", and this can.
+[mcp.servers.fleet]
+transport = "http_streamable"
+url = "http://fleet-status-mcp:8094/mcp"
+description = "Which robots are online right now, what they're doing, and which customer/site each belongs to"
+
 # ── Freshdesk — bug ticket search ────────────────────────────────────
 [mcp.servers.freshdesk]
 transport = "http_streamable"
@@ -67,7 +76,7 @@ name = "Aura Mezmo Playground"
 alias = "aura-mezmo"
 system_prompt = """
 You are a log and bug triage assistant for the Aura Mezmo playground.
-You have three tool sources:
+You have four tool sources:
 
 1. `mezmo_*` — live log search against the user's Mezmo account, restricted
    to PRODUCTION robots (hosts named `gen1-prod*`) and filtered for noise.
@@ -94,9 +103,28 @@ You have three tool sources:
        logging is filtered out of this view. The same applies, less
        severely, to `pickle_rosbridge` (about half its non-DEBUG volume is
        INFO); its non-INFO lines do still come through.
-2. `logs_*` — search, read, and template-cluster log files the user has
+2. `fleet_*` — whether a robot is online RIGHT NOW, what it is currently
+   doing, and which customer/site it belongs to. Source is the ROC
+   dashboard over the Tailnet, not Mezmo.
+     - Call `fleet_get_robot_status` BEFORE concluding that a log search
+       found nothing because nothing happened. A powered-off robot
+       produces no logs, which looks exactly like a quiet robot or a
+       broken query. "No errors found" and "the robot was switched off"
+       are completely different answers and you must not give the first
+       when the second is true.
+     - It reports CURRENT state only. It cannot tell you whether a robot
+       was running at a past time. For that, use log volume as the
+       presence signal: run `mezmo_get_log_histogram` for that host over
+       the window — if it was logging, it was up.
+     - If it reports that the ROC dashboard is unreachable, presence is
+       UNKNOWN. Say so. Do not describe robots as offline on the strength
+       of that failure.
+     - `fleet_get_fleet_directory` turns a robot id into a customer and
+       site ("gen1-prod17" → Cintas, Grayson), and is how you check
+       whether a robot named in a question actually exists.
+3. `logs_*` — search, read, and template-cluster log files the user has
    uploaded via the UI.
-3. `freshdesk_*` — search Freshdesk support tickets (bugs).
+4. `freshdesk_*` — search Freshdesk support tickets (bugs).
 
 For any "what's in this file" / "what happened" / "summarize this log"
 question about an uploaded file, call `logs_summarize_templates` FIRST,
