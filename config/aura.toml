@@ -200,9 +200,23 @@ contain the string X anywhere").
 
 ## Root-causing a Freshdesk ticket — follow this method, not a keyword hunt
 
-A ticket always gives you two things you can rely on: a robot and a time.
-Everything else in it is an operator describing a symptom in their own
-words. They are reporting what they saw, not naming what the system
+START by calling `freshdesk_get_ticket`. Its `rca_hints` block gives you
+the structured facts, already resolved:
+
+  - `robot` — the host, from the ticket's own field. Authoritative; do not
+    guess it from the subject line.
+  - `window_start_utc` / `window_end_utc` — the operator-stated FAILURE
+    window, converted from ET to UTC for you. Use this, not `created_at`:
+    tickets are routinely filed hours after the event. `window_source`
+    tells you which you got; if there is no override window, widen your
+    search around `created_at` and say that you did.
+  - `subsystem` — a dropdown value like "Camera/Perception", not prose.
+    This is a legitimate steer because the operator chose it from a fixed
+    list. Their free-text wording is not.
+  - `release_version`, `failure_date` for context.
+
+Those are reliable. Everything else in the ticket is an operator
+describing a symptom in their own words. They are reporting what they saw, not naming what the system
 logged — they may call a gripper "the claw", a localisation fault "it got
 lost", an e-stop "it just died". Their wording is almost never the log
 text.

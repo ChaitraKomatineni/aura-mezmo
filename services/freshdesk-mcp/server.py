@@ -13,6 +13,8 @@ feature) and FRESHDESK_API_KEY.
 
 import os
 import re
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastmcp import FastMCP
@@ -54,6 +56,73 @@ def _summarize(ticket: dict) -> dict:
         "created_at": ticket.get("created_at"),
         "updated_at": ticket.get("updated_at"),
     }
+
+
+# Operators fill these in on the ticket form, and they are worth far more
+# to an RCA than the free-text description: they are structured choices
+# rather than someone's wording. cf_robot_name and the override window
+# are the "which robot, which minutes" that log triage needs, and
+# crucially the override window is when the FAILURE happened -- tickets
+# are routinely filed hours later, so created_at is the wrong anchor.
+_ET = "America/New_York"
+_OVERRIDE_FORMATS = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M")
+
+
+def _parse_override(value):
+    """'09/18/2026 10:20 PM ET' -> aware UTC datetime, or None.
+
+    The trailing zone label is stripped and the time interpreted as
+    US Eastern, which is what the form means by 'ET'; zoneinfo resolves
+    EST vs EDT for the date itself rather than assuming a fixed offset.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    for suffix in (" ET", " EST", " EDT"):
+        if text.upper().endswith(suffix):
+            text = text[: -len(suffix)].strip()
+            break
+    for fmt in _OVERRIDE_FORMATS:
+        try:
+            naive = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        try:
+            return naive.replace(tzinfo=ZoneInfo(_ET)).astimezone(timezone.utc)
+        except Exception:  # noqa: BLE001 -- missing tzdata shouldn't 500 the tool
+            return None
+    return None
+
+
+def _rca_hints(ticket: dict) -> dict:
+    """The few fields an RCA actually needs, resolved and in UTC, so the
+    agent does not have to parse American dates or convert zones."""
+    cf = ticket.get("custom_fields") or {}
+    start = _parse_override(cf.get("cf_start_override"))
+    end = _parse_override(cf.get("cf_end_override"))
+    hints = {
+        "robot": cf.get("cf_robot_name"),
+        "subsystem": next((v for k, v in cf.items()
+                           if k.startswith("cf_subsystem") and v), None),
+        "release_version": cf.get("cf_release_version"),
+        "failure_date": cf.get("cf_time_of_failure"),
+        "window_start_utc": start.strftime("%Y-%m-%dT%H:%M:%SZ") if start else None,
+        "window_end_utc": end.strftime("%Y-%m-%dT%H:%M:%SZ") if end else None,
+        "window_source": None,
+    }
+    if start and end:
+        hints["window_source"] = (
+            "cf_start_override/cf_end_override (operator-stated failure window, "
+            "converted from ET). Prefer this over created_at -- tickets are "
+            "often filed well after the event."
+        )
+    elif ticket.get("created_at"):
+        hints["window_source"] = (
+            "No override window on this ticket. created_at is when it was "
+            "FILED, not when the failure happened -- widen the search window "
+            "accordingly and say that you did."
+        )
+    return {k: v for k, v in hints.items() if v not in (None, "", [])}
 
 
 @mcp.tool()
@@ -104,6 +173,13 @@ def get_ticket(ticket_id: int) -> dict:
 
     summary = _summarize(ticket)
     summary["description_text"] = ticket.get("description_text")
+    # Empty custom fields are dropped: a full Freshdesk form is ~23 keys
+    # and most are blank on any given ticket, which is pure context cost.
+    summary["custom_fields"] = {
+        k: v for k, v in (ticket.get("custom_fields") or {}).items()
+        if v not in (None, "", [])
+    }
+    summary["rca_hints"] = _rca_hints(ticket)
     return summary
 
 
