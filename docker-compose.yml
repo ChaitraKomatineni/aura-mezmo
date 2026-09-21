@@ -94,9 +94,11 @@ services:
 
   # ── Mezmo proxy — production-only, read-only gateway to mcp.mezmo.com ─
   # Aura points at this instead of at https://mcp.mezmo.com/mcp (see
-  # config/aura.toml). It re-exposes 9 read-only log tools out of the 32
-  # Mezmo offers, and AND-injects `host:gen1-prod -level:debug` into every
-  # query. It is the only container that gets MEZMO_API_KEY.
+  # config/aura.toml). It re-exposes a read-only subset of the 32 tools
+  # Mezmo offers, and AND-injects a production-only, noise-filtered scope
+  # into every query. The clause is deliberately not duplicated here --
+  # the container prints it at startup and exposes a `describe_scope` tool.
+  # It is the only container that gets MEZMO_API_KEY.
   mezmo-proxy:
     build: ./services/mezmo-proxy
     container_name: aura-mezmo-proxy

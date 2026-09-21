@@ -11,8 +11,14 @@ cannot argue its way around:
      does not exist from Aura's point of view.
   2. A PRODUCTION-ONLY SCOPE. Every query is rewritten to AND in
      `host:gen1-prod`, so only production robots are ever searched, plus
-     two noise filters: `-level:debug` (~80% of line volume, measured) and
-     suppression of INFO from the two highest-volume apps (a further ~50%).
+     noise filters applied PER APP AND LEVEL rather than by dropping a
+     level globally -- fastloop loses DEBUG and INFO, taskloop loses
+     DEBUG, pickle_rosbridge loses INFO, and 13 housekeeping apps are
+     gated to problems only. Together that is 120.8M raw lines/day down
+     to 39.9M. DEBUG from path_planning, action_planning and vision is
+     deliberately KEPT: that is where those subsystems reason, and a
+     global DEBUG rule was discarding 28M diagnostic lines a day to
+     silence two chatty loops.
   3. A RESPONSE TRIPWIRE. Responses are checked for structural `host`
      fields outside scope, in case an upstream tool ever ignores `query`.
 
@@ -58,24 +64,46 @@ PORT = int(os.environ.get("PORT", "8093"))
 # form and already matches every gen1-prod* host.
 PROD_HOST_PREFIX = "gen1-prod"
 
-# Apps whose INFO-level chatter is suppressed. These two are the fleet's
-# highest-volume talkers and their INFO lines are routine loop telemetry,
-# not events worth an agent's context. Measured over a pinned 8h window:
-#   fastloop         INFO 5,095,097 of 5,098,577 non-debug lines (99.93%)
-#   pickle_rosbridge INFO   784,153 of 1,506,263 non-debug lines (52.1%)
+# Noise is suppressed PER APP AND LEVEL, not by dropping a level globally.
 #
-# NOTE the consequence for fastloop: because essentially all of its
-# non-debug output is INFO, suppressing INFO removes fastloop from the
-# agent's view almost entirely (3,480 lines survive in that window). The
-# system prompt in config/aura.toml says so explicitly, so the agent
-# reports "fastloop's routine logging is filtered out here" instead of
-# concluding fastloop was idle.
+# An earlier version excluded `-level:debug` fleet-wide. That is a blunter
+# instrument than it looks: DEBUG is where path_planning, action_planning
+# and vision do their actual reasoning, and dropping all of it discards
+# 28M lines/day of genuinely diagnostic content to silence two chatty
+# loops. Measured fleet-wide on Fri 2026-09-18, the DEBUG that a global
+# rule was throwing away:
+#
+#     fastloop          63,312,922     <- the actual noise
+#     path_planning     13,075,160     <- diagnostic, was being lost
+#     action_planning   12,128,697     <- diagnostic, was being lost
+#     vision             3,121,594     <- diagnostic, was being lost
+#     taskloop           1,527,692     <- noise
+#     camera / navigation / api-server / safety_interface /
+#     scan_perception / pickle_rosbridge / motor_controller  ~700k combined
+#
+# So the rule is now per-app. fastloop is the one app whose INFO is also
+# pure telemetry (an 83Hz control loop), so it loses both levels; taskloop
+# loses only DEBUG; pickle_rosbridge keeps the INFO rule it already had.
+#
+# Cost of being less blunt, measured on the same day fleet-wide: the agent
+# now sees 39,947,618 lines/day instead of 10,807,838 -- 3.7x more. See
+# SCOPE_CLAUSE below for why that matters for the 1,000,000-line cap.
+#
+# NOTE for fastloop specifically: because essentially all of its non-DEBUG
+# output is INFO, excluding both levels removes fastloop from the agent's
+# view almost entirely. config/aura.toml says so explicitly, so the agent
+# reports "fastloop's routine logging is filtered out of this view" rather
+# than concluding fastloop was idle.
 #
 # Matching is by prefix (Mezmo does this automatically), so `app:fastloop`
 # would also catch a future `fastloop2`. There is no fastloop2 in
 # production today -- `host:gen1-prod app:fastloop2` returns 0 -- but if one
 # ships, it inherits this suppression without anyone deciding that.
-INFO_SUPPRESSED_APPS = ("fastloop", "pickle_rosbridge")
+APP_LEVEL_EXCLUSIONS = {
+    "fastloop": ("debug", "info"),
+    "taskloop": ("debug",),
+    "pickle_rosbridge": ("info",),
+}
 
 
 # Apps that are operationally irrelevant to robot/arm/safety triage and are
@@ -189,37 +217,49 @@ def _known_benign_clause(entries) -> str:
     )
 
 
-def _info_noise_clause(apps: tuple[str, ...]) -> str:
-    """`-(level:info (app:a OR app:b))` -- exclude INFO, but only from these
-    apps; their WARN/ERROR/FATAL lines are still returned.
+def _app_level_clause(exclusions: dict[str, tuple[str, ...]]) -> str:
+    """One `-(app:X (level:a OR level:b))` per app, ANDed together.
 
     Negating a *group* isn't something Mezmo documents (its docs promise `-`
-    on a term, phrase, or field filter only), so this was verified against
-    the live account rather than assumed. On a pinned 8h window the baseline
-    was 11,825,178 lines and the INFO to be removed 5,879,250; this clause
-    returned exactly 5,945,928 = the difference. Three other formulations
-    -- two flat `-(level:info app:X)` clauses, and the De Morgan
-    `(-level:info OR (-app:X -app:Y))` form -- returned the identical count,
-    so the grouped version is chosen for being the one that scales cleanly
-    as apps are added to the tuple above.
+    on a term, phrase, or field filter only), so the shape was verified
+    against the live account rather than assumed: on a pinned 8h window the
+    baseline was 11,825,178 lines and the INFO to be removed 5,879,250, and
+    the clause returned exactly 5,945,928 -- the difference. Three
+    formulations agreed to the line, including a De Morgan
+    `(-level:info OR (-app:X -app:Y))` form; this one is used because it
+    scales cleanly as apps and levels are added to the dict above.
     """
-    if not apps:
-        return ""
-    return "-(level:info (" + " OR ".join(f"app:{a}" for a in apps) + "))"
+    parts = []
+    for app, levels in exclusions.items():
+        if not levels:
+            continue
+        lv = " OR ".join(f"level:{lv}" for lv in levels)
+        wrapped = f"({lv})" if len(levels) > 1 else lv
+        parts.append(f"-({_app_term(app)} {wrapped})")
+    return " ".join(parts)
 
 
 # AND-ed into every query. Order is irrelevant (whitespace is AND in Mezmo's
-# syntax). Each clause verified live against get_log_histogram:
-#   host:gen1-prod                        -> 9,166,715 lines / 8h
-#   host:gen1-prod -level:debug           -> 1,778,362 lines / 8h  (-80.6%)
-#   ... plus the INFO-noise clause        -> a further -49.7%
-#   ... plus the level-gate clause        -> a further -22.4%
+# syntax). Measured fleet-wide on Fri 2026-09-18:
+#   host:gen1-prod                        -> 120,767,854  (raw)
+#   ... plus the per-app level clause     ->  ~40,700,000
+#   ... plus the level-gate clause        ->   39,947,618  (33.1% of raw)
+#
+# NOTE, and this is the trade-off of keeping DEBUG: the previous global
+# `-level:debug` rule left 10,807,838 lines/day. Per-app leaves 39,947,618
+# -- 3.7x more. Mezmo refuses any query matching over 1,000,000 lines, so
+# `deduplicate_*`, `analyze_logs_for_root_cause_*` and
+# `get_correlated_timeline_*` now hit that cap on windows where they
+# previously did not. Fleet-wide that is roughly 1.7M lines/hour against a
+# 1M ceiling, i.e. sub-hour windows only; scoped to one robot it is well
+# under. The system prompt already tells the agent to narrow to one robot
+# before reaching for those tools, which is now load-bearing rather than
+# merely good practice.
 SCOPE_CLAUSE = " ".join(
     part
     for part in (
         f"host:{PROD_HOST_PREFIX}",
-        #"-level:debug",
-        _info_noise_clause(INFO_SUPPRESSED_APPS),
+        _app_level_clause(APP_LEVEL_EXCLUSIONS),
         _level_gate_clause(LEVEL_GATED_APPS, KEEP_LEVELS),
         _known_benign_clause(KNOWN_BENIGN),
     )
@@ -252,11 +292,21 @@ UNSCOPED_TOOLS = {
 
 ALLOWLIST = SCOPED_TOOLS | UNSCOPED_TOOLS
 
+# Exposed WITH A CAVEAT:
+#   group_logs_by_field       - exposed on request, but its numbers are
+#                               ordinal only. Measured: its `total` ran
+#                               2.28x the real line count, and grouping by
+#                               `app` summed to 4.4x (one bucket reported
+#                               pct 108.3). "Which robot is noisiest" is
+#                               trustworthy; "how many lines" is not, and
+#                               config/aura.toml tells the agent so. It is
+#                               kept because it is one of only two log
+#                               tools not subject to the 1,000,000-line
+#                               cap, which makes it the cheap way to find
+#                               where to look before spending a capped
+#                               tool on it.
+#
 # Deliberately NOT exposed, and why:
-#   group_logs_by_field       - its buckets summed to 1.96x its own stated
-#                               total on a real run (one bucket reported
-#                               pct 108.3), so its numbers can't be trusted
-#                               in front of a customer yet.
 #   list_log_fields           - takes no query, so it cannot be scoped; also
 #                               returned 107 KB / 4,430 fields in one call.
 #   tap_pipeline_component    - taps live pipeline data with no query
@@ -589,6 +639,63 @@ def unwrap_arguments(arguments: dict) -> dict:
     return {k: v for k, v in parsed.items() if v is not None}
 
 
+class DescribeScopeTool(Tool):
+    """Publishes the proxy's live scope instead of making the prompt carry a
+    copy of it.
+
+    The prompt used to restate the clause verbatim, and drifted: it claimed
+    `-level:debug` was applied for weeks after that line was disabled, so
+    the agent was told DEBUG was invisible while it was being returned.
+    Filter rules and the description of the filter rules are now the same
+    artifact, and there is nothing to keep in sync.
+    """
+
+    async def run(self, arguments: dict) -> ToolResult:
+        payload = {
+            "injected_clause": SCOPE_CLAUSE,
+            "production_hosts": f"{PROD_HOST_PREFIX}* (exact-matched per robot)",
+            "app_level_exclusions": {a: list(lv) for a, lv in APP_LEVEL_EXCLUSIONS.items()},
+            "apps_gated_to_problems_only": list(LEVEL_GATED_APPS),
+            "levels_kept_for_gated_apps": list(KEEP_LEVELS),
+            "suppressed_known_benign": [
+                {"label": e["label"], "why": e["why"]} for e in KNOWN_BENIGN
+            ],
+            "tools_exposed": sorted(ALLOWLIST),
+            "notes": [
+                "DEBUG is available except where app_level_exclusions says otherwise.",
+                "Apps with no `level` field at all (audit, kernel, kern.log, "
+                "auth.log) are removed entirely by the problems-only gate -- "
+                "you cannot see them, which is not the same as them being empty.",
+                "Mezmo rejects any query matching over 1,000,000 lines. Narrow "
+                "to one robot before using deduplicate_*, "
+                "analyze_logs_for_root_cause_* or get_correlated_timeline_*.",
+            ],
+        }
+        return ToolResult(content=[], structured_content=payload,
+                          meta={"text": json.dumps(payload, indent=2)})
+
+
+def describe_scope_tool() -> DescribeScopeTool:
+    return DescribeScopeTool(
+        name="describe_scope",
+        description=(
+            "What filtering is applied to every query you send, verbatim and "
+            "live: the injected clause, which apps lose which levels, which "
+            "apps are gated to errors only, known-benign suppressions, and the "
+            "volume cap. Call this instead of assuming what is filtered -- it "
+            "is generated from the running configuration, so it cannot be "
+            "out of date."
+        ),
+        # No `required` key at all. With `"required": []` present, Aura's
+        # schema sanitiser (sanitize_schemas = true, "OpenAI compatibility")
+        # silently drops the tool: the proxy listed 11, Aura registered 10
+        # and logged nothing about the one it discarded. get_current_time,
+        # which also takes no arguments, survives because its upstream
+        # schema omits the key rather than sending it empty.
+        parameters={"type": "object", "properties": {}},
+    )
+
+
 def input_schema_of(tool) -> dict:
     """mcp SDK v2 renamed inputSchema -> input_schema; read whichever this
     client version provides."""
@@ -669,9 +776,15 @@ def main() -> int:
     mcp = FastMCP("mezmo-proxy")
     for proxy in proxies:
         mcp.add_tool(proxy)
+    # Local, not proxied: this one answers from our own configuration.
+    mcp.add_tool(describe_scope_tool())
 
+    # Derived, never a literal -- a hand-maintained tool count had already
+    # drifted (three files said 9 while the allowlist held 10).
     print(
-        f"Serving {len(proxies)} tool(s) on port {PORT} | tripwire: {TRIPWIRE_MODE}",
+        f"Serving {len(proxies) + 1} tool(s) on port {PORT} "
+        f"| {len(proxies)} proxied + describe_scope "
+        f"| tripwire: {TRIPWIRE_MODE}",
         flush=True,
     )
     print(f"  scope: {SCOPE_CLAUSE}", flush=True)

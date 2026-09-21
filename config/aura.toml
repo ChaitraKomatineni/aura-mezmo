@@ -1,8 +1,9 @@
 # Aura Mezmo Playground — agent configuration
 #
-# Single agent (no orchestration) wired to three MCP tool servers:
-#   - mezmo:     hosted MCP for live log search/export (mcp.mezmo.com)
+# Single agent (no orchestration) wired to four MCP tool servers:
+#   - mezmo:     the local mezmo-proxy, which fronts mcp.mezmo.com
 #   - logs:      local server exposing user-uploaded log files
+#   - fleet:     local server exposing live robot presence (via the ROC dashboard)
 #   - freshdesk: local server exposing Freshdesk ticket search
 #
 # Changes take effect after: docker compose restart aura
@@ -16,9 +17,12 @@ sanitize_schemas = true
 
 # ── Mezmo — live logs, via the production-only proxy ────────────────
 # NOT https://mcp.mezmo.com/mcp directly. mezmo-proxy (services/mezmo-proxy)
-# re-exposes 9 read-only log tools out of Mezmo's 32 and AND-injects
-# `host:gen1-prod -level:debug` into every query, in Python, before the call
-# leaves the network. That enforcement is not something this config or the
+# re-exposes a read-only subset of Mezmo's 32 tools and AND-injects a
+# production-only, noise-filtered scope into every query, in Python, before
+# the call leaves the network. The exact clause is NOT restated here on
+# purpose -- it drifted for weeks when it was. Ask the proxy: it exposes a
+# `describe_scope` tool, and prints the live clause at startup.
+# That enforcement is not something this config or the
 # system prompt below can relax -- and MEZMO_API_KEY is deliberately absent
 # from the aura container (see docker-compose.yml), so there is no path
 # around the proxy. No Authorization header is needed here: the proxy holds
@@ -26,7 +30,7 @@ sanitize_schemas = true
 [mcp.servers.mezmo]
 transport = "http_streamable"
 url = "http://mezmo-proxy:8093/mcp"
-description = "Live Mezmo log search over production robots (gen1-prod*), excluding DEBUG"
+description = "Live Mezmo log search over production robots (gen1-prod*), noise-filtered per app and level — call describe_scope for specifics"
 
 [mcp.servers.mezmo.scratchpad]
 "*" = { min_tokens = 2000 }
@@ -107,10 +111,10 @@ You have four:
 
 1. `mezmo_*` — live log search against the user's Mezmo account, restricted
    to PRODUCTION robots (hosts named `gen1-prod*`) and filtered for noise.
-   These restrictions are enforced in the proxy, not by you: every query you
-   send has this AND-ed onto it before it reaches Mezmo —
-
-       host:gen1-prod -level:debug -(level:info (app:fastloop OR app:pickle_rosbridge))
+   These restrictions are enforced in the proxy, not by you: your queries
+   are scoped before they reach Mezmo. Call `mezmo_describe_scope` if you
+   need the exact clause — do not assume it, and do not repeat it back from
+   memory, because it changes.
 
    Consequences worth knowing:
      - Do not re-add any of those clauses yourself; they are already there.
@@ -120,8 +124,19 @@ You have four:
        (`gen1-proto*`), or any non-gen1 host returns an explicit
        out-of-scope error. Relay that to the user plainly — it is a
        deliberate policy, not a malfunction, and retrying will not help.
-     - DEBUG lines are invisible to you here. If a question can only be
-       answered from DEBUG output, say so rather than guessing.
+     - DEBUG is AVAILABLE to you for most apps, and it is where
+       path_planning, action_planning and vision do their real reasoning —
+       reach for it when a WARN/ERROR alone doesn't explain something. The
+       exceptions: `fastloop` has both DEBUG and INFO excluded, and
+       `taskloop` has DEBUG excluded, because those two are high-rate
+       control-loop telemetry rather than events.
+     - Because DEBUG is available, volume is high — roughly 1.7M lines an
+       hour fleet-wide. Mezmo refuses any query matching over 1,000,000
+       lines, so `deduplicate_*`, `analyze_logs_for_root_cause_*` and
+       `get_correlated_timeline_*` WILL be rejected on a fleet-wide hour.
+       Narrow to one robot, and a tighter window, before reaching for
+       them. `mezmo_get_log_histogram` and `mezmo_group_logs_by_field` are
+       not capped, so use those first to find where to look.
      - Naming one robot gives you exactly that robot. Mezmo normally
        prefix-matches, so `host:gen1-prod2` would also return gen1-prod20,
        gen1-prod22 and so on; the proxy rewrites specific robot names to
@@ -148,13 +163,15 @@ You have four:
        those logs, which is not the same as them being empty. Say the
        category is outside this view.
      - IMPORTANT: `fastloop` will look almost silent, and that is an
-       artifact of this filter, not a fact about the robot. Nearly all of
-       fastloop's non-DEBUG output is INFO, so what reaches you is only its
-       WARN/ERROR/FATAL lines. Never infer from thin fastloop results that
-       fastloop was idle, not running, or healthy. Say that its routine
-       logging is filtered out of this view. The same applies, less
-       severely, to `pickle_rosbridge` (about half its non-DEBUG volume is
-       INFO); its non-INFO lines do still come through.
+       artifact of this filter, not a fact about the robot. Both its DEBUG
+       and its INFO are excluded, and nearly all of its output is one or
+       the other, so what reaches you is only its WARN/ERROR/FATAL lines.
+       Never infer from thin fastloop results that fastloop was idle, not
+       running, or healthy. Say that its routine logging is filtered out of
+       this view. `taskloop` is milder — only its DEBUG is excluded, so its
+       INFO still comes through, which matters because the container
+       start/stop session markers are taskloop INFO. `pickle_rosbridge`
+       keeps its DEBUG but loses INFO.
 2. `fleet_*` — whether a robot is online RIGHT NOW, what it is currently
    doing, and which customer/site it belongs to. Source is the ROC
    dashboard over the Tailnet, not Mezmo.
