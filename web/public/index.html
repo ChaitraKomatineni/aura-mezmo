@@ -357,10 +357,10 @@
     </table>
 
     <div class="inline-panel" id="fd-filter-panel">
-      <div class="title">Correlating ticket <b id="fd-filter-title"></b> &mdash; filters below are guessed from the ticket, edit as needed</div>
+      <div class="title">Correlating ticket <b id="fd-filter-title"></b> &mdash; Aura searches the window top-down by severity; the ticket wording is used to judge the match, not to drive the search</div>
       <div class="field">
-        <label>Service / keyword filter</label>
-        <input id="fd-filter-keyword" placeholder="e.g. checkout-service" />
+        <label>Extra keyword (optional &mdash; usually leave blank)</label>
+        <input id="fd-filter-keyword" placeholder="leave blank: operator wording rarely matches log text" />
       </div>
       <div class="row">
         <div class="field">
@@ -899,8 +899,13 @@ async function openFreshdeskFilters(ticketId) {
   fdFilterPanel.dataset.subject = t.subject || '';
   fdFilterPanel.dataset.description = (t.description_text || '').slice(0, 400);
 
-  // Guess a keyword filter from the subject; the user can edit it.
-  fdFilterKeyword.value = t.subject || '';
+  // Deliberately NOT prefilled from the subject any more. Tickets are
+  // written by operators describing a symptom in their own words, which
+  // rarely matches the log text -- seeding the search with that wording
+  // biases the whole RCA toward whatever the operator happened to call
+  // the thing. The severity ladder finds candidates; the ticket wording
+  // is then used to judge whether a candidate fits.
+  fdFilterKeyword.value = '';
 
   // Prefill a window around when the ticket was created — editable.
   const created = t.created_at ? new Date(t.created_at) : new Date();
@@ -925,14 +930,20 @@ document.getElementById('fd-filter-run').addEventListener('click', () => {
   const level = fdFilterLevel.value;
   const levelPhrase = level === 'any' ? 'any level' : level + '-level';
 
-  let prompt = 'Investigate Freshdesk ticket #' + ticketId + ': "' + subject + '".';
-  if (description) prompt += ' Ticket description: "' + description + '".';
-  prompt += ' Search both uploaded logs and live Mezmo logs, filtered to ' + levelPhrase +
-    ' entries';
-  if (keyword) prompt += ' matching "' + keyword + '"';
-  if (start && end) prompt += ', between ' + start + ' and ' + end + ' (UTC)';
-  prompt += '. Quote the exact matching log lines and summarize the likely root cause, ' +
-    'citing the ticket number.';
+  // Ask for the top-down RCA method rather than a keyword hunt. The
+  // ticket text is supplied LAST and explicitly framed as something to
+  // test candidates against, not to search for.
+  let prompt = 'Root-cause Freshdesk ticket #' + ticketId + '.';
+  if (start && end) prompt += ' Window: ' + start + ' to ' + end + ' (UTC).';
+  prompt += ' Work top-down by severity: FATAL, then CRITICAL, then ERROR, then WARN.' +
+    ' Do not search for the operator\'s wording.';
+  if (level !== 'any') prompt += ' Start at ' + levelPhrase + ' rather than the top.';
+  if (keyword) prompt += ' The user additionally asked to consider "' + keyword + '".';
+  prompt += ' Only once you have candidate events, compare them against the ticket' +
+    ' text below and say plainly whether they explain the reported symptom.' +
+    ' Quote the exact log lines and cite the ticket number.';
+  prompt += '\n\nTicket subject: "' + subject + '"';
+  if (description) prompt += '\nTicket description: "' + description + '"';
 
   sendChat(prompt);
   fdFilterPanel.classList.remove('open');
