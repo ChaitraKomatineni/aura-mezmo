@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
@@ -104,7 +105,7 @@ SCOPE_CLAUSE = " ".join(
     part
     for part in (
         f"host:{PROD_HOST_PREFIX}",
-        "-level:debug",
+        #"-level:debug",
         _info_noise_clause(INFO_SUPPRESSED_APPS),
     )
     if part
@@ -122,6 +123,7 @@ SCOPED_TOOLS = {
     "get_correlated_timeline_relative_time",
     "get_correlated_timeline_time_range",
     "get_log_histogram",
+    "group_logs_by_field",
 }
 
 # Tools that take no query because they return no log data at all -- pure
@@ -267,6 +269,54 @@ def check_response_scope(tool_name: str, result) -> None:
             return
 
 
+def enrich_current_time(result):
+    """Add weekday names to get_current_time's response.
+
+    Upstream returns only ISO instants -- {"now", "one_hour_ago",
+    "one_day_ago"} -- with no weekday anywhere. That leaves the agent doing
+    calendar arithmetic in its head to resolve "this past Friday", and it
+    gets it wrong: asked for Friday it queried 2026-09-19 (a Saturday),
+    found zero logs, and reported the robot as down for a day it had in
+    fact logged 24 million lines.
+
+    So resolve the calendar here, where it is a library call rather than a
+    guess. `weekday_to_date` is the direct answer to "this past <day>" and
+    is what makes the lookup arithmetic-free.
+    """
+    payload = next((p for p in response_payloads(result) if isinstance(p, dict)), None)
+    blocks = list(getattr(result, "content", None) or [])
+    if payload is None or not blocks or not hasattr(blocks[0], "text"):
+        return result
+    try:
+        now = datetime.fromisoformat(str(payload.get("now")).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return result
+
+    day = lambda n: now - timedelta(days=n)  # noqa: E731
+    # Most recent occurrence of each weekday, today included. Offset 0-6
+    # from today covers exactly one of each.
+    weekday_to_date = {day(i).strftime("%A"): day(i).strftime("%Y-%m-%d") for i in range(7)}
+
+    payload = dict(payload)
+    payload.update({
+        "today": now.strftime("%Y-%m-%d"),
+        "weekday": now.strftime("%A"),
+        "yesterday": day(1).strftime("%Y-%m-%d"),
+        "last_14_days": {day(i).strftime("%Y-%m-%d"): day(i).strftime("%A")
+                         for i in range(14)},
+        "weekday_to_date": weekday_to_date,
+        "retention_earliest": day(30).strftime("%Y-%m-%d"),
+        "note": (
+            "Use weekday_to_date to resolve phrases like 'this past Friday' "
+            "-- do not compute dates yourself. Every date is UTC. Queries "
+            "before retention_earliest will be rejected."
+        ),
+    })
+
+    enriched = blocks[0].model_copy(update={"text": json.dumps(payload)})
+    return ToolResult(content=[enriched] + blocks[1:], structured_content=payload)
+
+
 async def call_upstream(tool_name: str, arguments: dict):
     """Forward one call to Mezmo under this server's own credentials.
 
@@ -298,6 +348,9 @@ class ProxiedTool(Tool):
 
         result = await call_upstream(self.name, arguments)
         check_response_scope(self.name, result)
+
+        if self.name == "get_current_time" and not getattr(result, "is_error", False):
+            return enrich_current_time(result)
 
         return ToolResult(
             content=list(getattr(result, "content", None) or []),
