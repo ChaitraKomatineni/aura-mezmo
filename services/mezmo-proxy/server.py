@@ -29,6 +29,7 @@ NOT supported), and the agent needs that text to build valid queries.
 """
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -452,7 +453,7 @@ class ProxiedTool(Tool):
     membership in SCOPED_TOOLS."""
 
     async def run(self, arguments: dict) -> ToolResult:
-        arguments = dict(arguments or {})
+        arguments = unwrap_arguments(dict(arguments or {}))
 
         if self.name in SCOPED_TOOLS:
             offending = find_out_of_scope_host(arguments.get("query"))
@@ -471,6 +472,86 @@ class ProxiedTool(Tool):
             structured_content=getattr(result, "structured_content", None),
             is_error=bool(getattr(result, "is_error", False)),
         )
+
+
+# Upstream schema defects worth repairing before the agent ever sees them.
+#
+# `dedup_mode` DOES describe itself upstream, but as a `oneOf` of two
+# `const` branches. That form survives the pipeline badly: fastmcp
+# surfaces the property as type=None/enum=None, and the model evidently
+# does not follow it either. A flat type+enum alongside the oneOf is
+# understood by both. Observed in the wild before this patch, it emitted
+#     "dedup_mode": none
+# i.e. the bare Python literal, which is not valid JSON. The tool-call
+# JSON then failed to parse and the framework fell back to passing the
+# whole argument blob as a single string under a "result" key, so the
+# server saw no from_time at all and rejected the call. The agent retried
+# the same malformed call nine times.
+#
+# The error sweep (experiments/mcp-tool-behavior) already established the
+# real domain: "unknown variant `exact`, expected `none` or `template`".
+# Declaring that here means the model emits a quoted, valid value.
+SCHEMA_PATCHES = {
+    "get_correlated_timeline_time_range": {
+        "dedup_mode": {"type": "string", "enum": ["none", "template"]},
+    },
+    "get_correlated_timeline_relative_time": {
+        "dedup_mode": {"type": "string", "enum": ["none", "template"]},
+    },
+}
+
+
+def patch_schema(tool_name: str, schema: dict) -> dict:
+    """Apply SCHEMA_PATCHES, and warn about any other untyped property --
+    an untyped parameter is the same landmine waiting to go off."""
+    patches = SCHEMA_PATCHES.get(tool_name) or {}
+    props = schema.get("properties") or {}
+    if patches:
+        schema = copy.deepcopy(schema)
+        props = schema.setdefault("properties", {})
+        for name, patch in patches.items():
+            if name in props:
+                props[name].update(patch)
+                print(f"    patched {tool_name}.{name} -> {patch}", flush=True)
+    for name, spec in props.items():
+        if not spec.get("type") and not spec.get("enum") and "$ref" not in spec:
+            print(f"    WARNING: {tool_name}.{name} has no type or enum; the "
+                  "model will be guessing its shape", file=sys.stderr, flush=True)
+    return schema
+
+
+def unwrap_arguments(arguments: dict) -> dict:
+    """Undo the framework's {"result": "<raw json text>"} fallback.
+
+    When the model emits tool-call JSON that will not parse, Aura/rig hands
+    the raw text through as a single `result` string rather than failing
+    loudly, which surfaces here as a baffling "missing field `from_time`".
+    Recover the real arguments where we can. The SCHEMA_PATCHES above are
+    the actual fix -- this is a net under it, for the next malformed value
+    we have not predicted.
+    """
+    if set(arguments) != {"result"} or not isinstance(arguments["result"], str):
+        return arguments
+    raw = arguments["result"]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # Python literals leaking into JSON is the failure we actually saw.
+        repaired = re.sub(r"(?<=:\s)(none|None)(?=\s*[,}])", "null", raw)
+        repaired = re.sub(r"(?<=:\s)True(?=\s*[,}])", "true", repaired)
+        repaired = re.sub(r"(?<=:\s)False(?=\s*[,}])", "false", repaired)
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError:
+            return arguments
+    if not isinstance(parsed, dict):
+        return arguments
+    print(f"  recovered arguments from a malformed tool call: {sorted(parsed)}",
+          file=sys.stderr, flush=True)
+    # A null that came from a bare `none` means "the model meant the string
+    # 'none'" for enum-ish fields; dropping it lets the server default
+    # instead of rejecting a null.
+    return {k: v for k, v in parsed.items() if v is not None}
 
 
 def input_schema_of(tool) -> dict:
@@ -497,7 +578,7 @@ async def discover_tools() -> list[ProxiedTool]:
     proxies = []
     for name in sorted(ALLOWLIST & by_name.keys()):
         tool = by_name[name]
-        schema = input_schema_of(tool)
+        schema = patch_schema(name, input_schema_of(tool))
 
         # A scoped tool with no `query` parameter could not be constrained,
         # so refuse it rather than register something unenforceable.
