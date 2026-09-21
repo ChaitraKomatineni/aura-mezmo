@@ -1,4 +1,4 @@
-"""
+﻿"""
 Freshdesk MCP Server
 
 Wraps the Freshdesk API v2 (https://developers.freshdesk.com/api/) so the
@@ -13,7 +13,7 @@ feature) and FRESHDESK_API_KEY.
 
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -68,6 +68,52 @@ _ET = "America/New_York"
 _OVERRIDE_FORMATS = ("%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M")
 
 
+# Unfilled override fields come back as the form's own hint text rather
+# than empty, e.g. "MM/DD/YYYY HH:MM AM/PM TZ (e.g. 05/15/2026 02:30 PM
+# ET)". Left alone that reads as data.
+_PLACEHOLDER_RE = re.compile(r"MM/DD/YYYY|YYYY-MM-DD|\(e\.g\.|^N/?A$", re.IGNORECASE)
+
+# Tickets raised by the on-robot reporter embed the exact moment in the
+# description, e.g. "Report Time: Thu Sep 17 12:38:34 PM EDT 2026" -- the
+# output of `date`. When the operator has not filled the override window
+# this is the most precise anchor available, and it beats created_at.
+_REPORT_TIME_RE = re.compile(
+    r"Report Time:\s*\w{3}\s+(\w{3})\s+(\d{1,2})\s+"
+    r"(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)\s+([A-Z]{2,4})\s+(\d{4})")
+_MONTHS = {m: i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], start=1)}
+_ZONE_ALIASES = {"EDT": _ET, "EST": _ET, "ET": _ET,
+                 "CDT": "America/Chicago", "CST": "America/Chicago",
+                 "CT": "America/Chicago",
+                 "MDT": "America/Denver", "MST": "America/Denver",
+                 "PDT": "America/Los_Angeles", "PST": "America/Los_Angeles",
+                 "UTC": "UTC", "GMT": "UTC"}
+
+
+def _is_placeholder(value) -> bool:
+    return isinstance(value, str) and bool(_PLACEHOLDER_RE.search(value))
+
+
+def _parse_report_time(description):
+    """'Report Time: Thu Sep 17 12:38:34 PM EDT 2026' -> UTC datetime."""
+    if not isinstance(description, str):
+        return None
+    m = _REPORT_TIME_RE.search(description)
+    if not m:
+        return None
+    mon, day, hh, mm, ss, ampm, zone, year = m.groups()
+    hour = int(hh) % 12 + (12 if ampm.upper() == "PM" else 0)
+    try:
+        naive = datetime(int(year), _MONTHS[mon.title()], int(day),
+                         hour, int(mm), int(ss))
+        return naive.replace(
+            tzinfo=ZoneInfo(_ZONE_ALIASES.get(zone.upper(), "UTC"))
+        ).astimezone(timezone.utc)
+    except (KeyError, ValueError, Exception):  # noqa: B014
+        return None
+
+
 def _parse_override(value):
     """'09/18/2026 10:20 PM ET' -> aware UTC datetime, or None.
 
@@ -75,7 +121,7 @@ def _parse_override(value):
     US Eastern, which is what the form means by 'ET'; zoneinfo resolves
     EST vs EDT for the date itself rather than assuming a fixed offset.
     """
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip() or _is_placeholder(value):
         return None
     text = value.strip()
     for suffix in (" ET", " EST", " EDT"):
@@ -116,12 +162,29 @@ def _rca_hints(ticket: dict) -> dict:
             "converted from ET). Prefer this over created_at -- tickets are "
             "often filed well after the event."
         )
-    elif ticket.get("created_at"):
-        hints["window_source"] = (
-            "No override window on this ticket. created_at is when it was "
-            "FILED, not when the failure happened -- widen the search window "
-            "accordingly and say that you did."
-        )
+    else:
+        # Fall back to the reporter's own timestamp in the description,
+        # which is exact, before falling back to created_at, which is not.
+        reported = _parse_report_time(ticket.get("description_text"))
+        if reported:
+            hints["window_start_utc"] = (
+                reported - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            hints["window_end_utc"] = (
+                reported + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            hints["reported_at_utc"] = reported.strftime("%Y-%m-%dT%H:%M:%SZ")
+            hints["window_source"] = (
+                "No override window was filled in, so this is +/-30min around "
+                "the 'Report Time:' line in the ticket description, converted "
+                "to UTC. That line is the on-robot reporter's own clock and is "
+                "the most precise anchor available here."
+            )
+        elif ticket.get("created_at"):
+            hints["window_source"] = (
+                "No override window and no parseable 'Report Time:' in the "
+                "description. created_at is when the ticket was FILED, not "
+                "when the failure happened -- widen the search window "
+                "accordingly and say that you did."
+            )
     return {k: v for k, v in hints.items() if v not in (None, "", [])}
 
 
@@ -177,7 +240,7 @@ def get_ticket(ticket_id: int) -> dict:
     # and most are blank on any given ticket, which is pure context cost.
     summary["custom_fields"] = {
         k: v for k, v in (ticket.get("custom_fields") or {}).items()
-        if v not in (None, "", [])
+        if v not in (None, "", []) and not _is_placeholder(v)
     }
     summary["rca_hints"] = _rca_hints(ticket)
     return summary
@@ -209,3 +272,4 @@ def list_recent_tickets(limit: int = 10) -> dict:
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="0.0.0.0", port=8092)
+

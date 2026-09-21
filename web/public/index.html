@@ -875,10 +875,18 @@ document.getElementById('fd-recent-load').addEventListener('click', loadRecentFr
 document.getElementById('fd-recent-days').addEventListener('change', loadRecentFreshdesk);
 loadRecentFreshdesk();
 
-function toLocalInputValue(date) {
+// UTC, deliberately. The two inputs are labelled "(UTC)" and the prompt
+// sends their values as UTC, so they must not be filled with browser-local
+// time. They were: this read getHours() etc., so a browser in US Central
+// turned a 16:38Z ticket into a "11:08-12:08 UTC" window -- five hours
+// wrong. Ticket #7905 was investigated against an empty hour because of
+// it, and reported as "the robot was not producing logs", when the real
+// window held a FATAL at exactly the reported minute.
+function toUtcInputValue(date) {
   const pad = (n) => String(n).padStart(2, '0');
-  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) +
-    'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+  return date.getUTCFullYear() + '-' + pad(date.getUTCMonth() + 1) + '-' +
+    pad(date.getUTCDate()) + 'T' + pad(date.getUTCHours()) + ':' +
+    pad(date.getUTCMinutes());
 }
 
 async function openFreshdeskFilters(ticketId) {
@@ -911,8 +919,8 @@ async function openFreshdeskFilters(ticketId) {
   const created = t.created_at ? new Date(t.created_at) : new Date();
   const start = new Date(created.getTime() - 30 * 60 * 1000);
   const end = new Date(created.getTime() + 30 * 60 * 1000);
-  fdFilterStart.value = toLocalInputValue(start);
-  fdFilterEnd.value = toLocalInputValue(end);
+  fdFilterStart.value = toUtcInputValue(start);
+  fdFilterEnd.value = toUtcInputValue(end);
   fdFilterLevel.value = 'any';
 }
 
