@@ -144,6 +144,50 @@ def _level_gate_clause(apps: tuple[str, ...], levels: tuple[str, ...]) -> str:
     return f"-({app_group} -{keep})"
 
 
+# Specific, known-benign messages that are suppressed even though they are
+# ERROR level. This list is different in kind from the structural filters
+# above -- those drop whole categories, these drop one known message -- so
+# it needs stricter discipline:
+#
+#   * Each entry requires ALL its terms, so it fails SAFE. If the message
+#     wording changes, the suppression simply stops matching and the error
+#     becomes visible again. The opposite (a loose single-word match) would
+#     silently hide a genuinely different fault from the same subsystem.
+#   * Each entry carries why it is benign, so the next person can judge
+#     whether it still is.
+#   * The agent is told these exist (see config/aura.toml) so it never
+#     reports a clean bill of health when the only thing it can see has
+#     been filtered.
+#
+# The point is not volume, it is keeping the ERROR tier trustworthy: the
+# Freshdesk RCA method walks severity top-down and reads ERROR first, so
+# a few thousand benign errors a day is exactly the wrong noise.
+KNOWN_BENIGN = (
+    {
+        "label": "temperature-probe: sensor not connected",
+        "why": (
+            "The PCsensor TEMPerX232 USB probe is deliberately not fitted on "
+            "these robots, so the reader logs ENOENT on /dev/serial/by-id/... "
+            "on every poll. Expected, not a fault."
+        ),
+        # Measured Fri 2026-09-18: 3,133 lines/day, 31% of everything that
+        # survives from user@1000.service. `"temperature-probe"` with
+        # `-"Is sensor connected"` returned 0, i.e. every temperature-probe
+        # line in the fleet is this one message -- so this is precise, not
+        # merely convenient. All three terms are required anyway.
+        "terms": ('app:"user@1000.service"', '"temperature-probe"',
+                  '"Is sensor connected"'),
+    },
+)
+
+
+def _known_benign_clause(entries) -> str:
+    """One `-(term term term)` per known-benign message, ANDed together."""
+    return " ".join(
+        "-(" + " ".join(e["terms"]) + ")" for e in entries if e.get("terms")
+    )
+
+
 def _info_noise_clause(apps: tuple[str, ...]) -> str:
     """`-(level:info (app:a OR app:b))` -- exclude INFO, but only from these
     apps; their WARN/ERROR/FATAL lines are still returned.
@@ -176,6 +220,7 @@ SCOPE_CLAUSE = " ".join(
         #"-level:debug",
         _info_noise_clause(INFO_SUPPRESSED_APPS),
         _level_gate_clause(LEVEL_GATED_APPS, KEEP_LEVELS),
+        _known_benign_clause(KNOWN_BENIGN),
     )
     if part
 )
@@ -510,10 +555,13 @@ def main() -> int:
         mcp.add_tool(proxy)
 
     print(
-        f"Serving {len(proxies)} tool(s) on port {PORT} | scope: {SCOPE_CLAUSE} "
-        f"| tripwire: {TRIPWIRE_MODE}",
+        f"Serving {len(proxies)} tool(s) on port {PORT} | tripwire: {TRIPWIRE_MODE}",
         flush=True,
     )
+    print(f"  scope: {SCOPE_CLAUSE}", flush=True)
+    for entry in KNOWN_BENIGN:
+        print(f"  suppressed (known-benign): {entry['label']} -- {entry['why']}",
+              flush=True)
     mcp.run(transport="streamable-http", host="0.0.0.0", port=PORT)
     return 0
 
