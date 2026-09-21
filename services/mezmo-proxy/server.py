@@ -77,6 +77,73 @@ PROD_HOST_PREFIX = "gen1-prod"
 INFO_SUPPRESSED_APPS = ("fastloop", "pickle_rosbridge")
 
 
+# Apps that are operationally irrelevant to robot/arm/safety triage and are
+# therefore gated down to problems only: VPN peer-discovery chatter, ROS
+# demo nodes, kernel/audit/auth housekeeping, SLAM and bag-recording
+# lifecycle, the metrics offload watcher, and the third-party OTA agent.
+# Everything from these apps is dropped UNLESS it carries one of
+# KEEP_LEVELS.
+#
+# Measured on Fri 2026-09-18 against the stream that actually reaches the
+# agent (i.e. after the production + DEBUG + fastloop-INFO scope): these
+# 13 apps were 3,136,442 of 13,935,928 lines -- 22.5% -- of which only
+# 11,485 were error-ish. So this removes ~22.4% of what the agent sees.
+# Against RAW fleet volume the same apps are only 2.6%; they loom much
+# larger once the bulk application logging has already been filtered out.
+#
+# IMPORTANT CONSEQUENCE, deliberate but worth knowing: `audit`, `kernel`,
+# `kern.log` and `auth.log` carry NO `level` field at all (measured: 0
+# lines with level:* across a full day), so this rule removes them
+# ENTIRELY rather than gating them. That is ~2.83M lines/day and it is
+# the intended outcome -- the dominant cluster there is a cadvisor ptrace
+# denial repeating up to 17/sec, a real but separate container-permissions
+# issue -- but it does mean the agent cannot see kernel or audit events at
+# all. Remove an app from this tuple if that ever needs revisiting.
+#
+# `cartographer_node`, `rosbag` and `foxglove_bridge` return zero lines on
+# production hosts today; they are listed so the rule still holds if those
+# subsystems start shipping from prod later.
+LEVEL_GATED_APPS = (
+    "tailscaled.service", "talker", "echoer",
+    "audit", "kernel", "kern.log", "ssh.service", "auth.log",
+    "cartographer_node", "rosbag", "foxglove_bridge",
+    "user@1000.service", "miru.service",
+)
+
+# Severities worth keeping from the apps above. Mezmo matches values
+# case-insensitively and by prefix, so `level:err` also covers ERR/error
+# variants -- both spellings are listed anyway because the fleet emits a
+# mix of cased and lowercase level values.
+KEEP_LEVELS = ("error", "critical", "fatal", "alert", "err")
+
+
+def _app_term(app: str) -> str:
+    """Quote app values containing punctuation. Unquoted, a value like
+    `user@1000.service` or `kern.log` risks tokenising on the punctuation
+    rather than matching as one term."""
+    return f'app:"{app}"' if any(c in app for c in "._@-") else f"app:{app}"
+
+
+def _level_gate_clause(apps: tuple[str, ...], levels: tuple[str, ...]) -> str:
+    """`-((app:a OR app:b) -(level:error OR ...))` -- drop everything from
+    these apps except the listed severities.
+
+    This is a negation wrapping a negation, which Mezmo does not document.
+    Verified live rather than assumed: on Fri 2026-09-18 the scoped stream
+    was 13,935,928 lines, these apps 3,136,442 of them, 11,485 error-ish,
+    so the expected result was 10,810,971 -- and this clause returned
+    exactly that. Two other formulations (a De Morgan
+    `(-(apps) OR (levels))` form, and one listing each `-level:` term
+    separately) returned the identical count; this one is used for being
+    the shortest and closest to the intent.
+    """
+    if not apps or not levels:
+        return ""
+    app_group = "(" + " OR ".join(_app_term(a) for a in apps) + ")"
+    keep = "(" + " OR ".join(f"level:{lv}" for lv in levels) + ")"
+    return f"-({app_group} -{keep})"
+
+
 def _info_noise_clause(apps: tuple[str, ...]) -> str:
     """`-(level:info (app:a OR app:b))` -- exclude INFO, but only from these
     apps; their WARN/ERROR/FATAL lines are still returned.
@@ -101,12 +168,14 @@ def _info_noise_clause(apps: tuple[str, ...]) -> str:
 #   host:gen1-prod                        -> 9,166,715 lines / 8h
 #   host:gen1-prod -level:debug           -> 1,778,362 lines / 8h  (-80.6%)
 #   ... plus the INFO-noise clause        -> a further -49.7%
+#   ... plus the level-gate clause        -> a further -22.4%
 SCOPE_CLAUSE = " ".join(
     part
     for part in (
         f"host:{PROD_HOST_PREFIX}",
         #"-level:debug",
         _info_noise_clause(INFO_SUPPRESSED_APPS),
+        _level_gate_clause(LEVEL_GATED_APPS, KEEP_LEVELS),
     )
     if part
 )
