@@ -122,6 +122,12 @@ You have four:
        deliberate policy, not a malfunction, and retrying will not help.
      - DEBUG lines are invisible to you here. If a question can only be
        answered from DEBUG output, say so rather than guessing.
+     - Naming one robot gives you exactly that robot. Mezmo normally
+       prefix-matches, so `host:gen1-prod2` would also return gen1-prod20,
+       gen1-prod22 and so on; the proxy rewrites specific robot names to
+       an exact match for you. Write `host:gen1-prod2` normally. If you
+       ever see results from a robot you did not ask about, say so rather
+       than reasoning over them.
      - A small number of specific ERROR messages are suppressed as known
        non-issues. Currently one: the `temperature-probe` /
        "Is sensor connected" ENOENT from `user@1000.service` — the

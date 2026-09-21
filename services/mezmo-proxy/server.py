@@ -274,7 +274,39 @@ ALLOWLIST = SCOPED_TOOLS | UNSCOPED_TOOLS
 # excludes `-host:` (a negated host filter only ever narrows, so rejecting
 # it would be wrong) and identifiers that merely end in "host", e.g.
 # `_host:` or `myhost:`, since [\w-] covers both the '-' and word cases.
-HOST_CLAUSE_RE = re.compile(r'(?<![\w-])host:("[^"]*"|[^\s()"]+)', re.IGNORECASE)
+HOST_CLAUSE_RE = re.compile(r'(?<![\w-])host:(?:==)?("[^"]*"|[^\s()"]+)', re.IGNORECASE)
+
+# Mezmo prefix-matches string fields automatically, so `host:gen1-prod2`
+# silently also returns gen1-prod20, gen1-prod22, gen1-prod23... On a real
+# day that is 39,940,404 lines when the robot itself logged 15,422,202 --
+# i.e. asking about one robot hands back nearly three robots' worth of
+# data with nothing to indicate it. An agent investigating gen1-prod2 was
+# repeatedly shown gen1-prod22's sessions and could not work out why.
+#
+# `==` forces an exact match. Verified two ways on Thu 2026-09-17:
+# `host:==gen1-prod2` returned 15,422,202, matching exactly what you get
+# by taking the prefix query and subtracting every sibling by hand.
+# Quoting alone does NOT do it (38,330,631), nor does a single `=`.
+#
+# Rewriting is limited to values that name a SPECIFIC robot -- the prod
+# prefix followed by digits. A bare `host:gen1-prod` stays a prefix,
+# because that is the fleet-wide scope this proxy injects itself and
+# turning it into `host:==gen1-prod` would match nothing at all.
+# Anchored to start-of-string, whitespace or an open paren, with an
+# optional leading `-`. That covers negated clauses too -- `-host:gen1-prod2`
+# left as a prefix would silently also exclude gen1-prod22, which is the
+# same data-loss bug pointing the other way -- while still not matching
+# `myhost:` or `my-host:`.
+SPECIFIC_HOST_RE = re.compile(
+    r'(?:(?<=^)|(?<=[\s(]))(-?)host:(?!==)"?(' + PROD_HOST_PREFIX + r'\d+[a-z]?)"?',
+    re.IGNORECASE,
+)
+
+
+def exactify_hosts(query: str) -> str:
+    """`host:gen1-prod2` -> `host:==gen1-prod2`, leaving `host:gen1-prod`
+    (the fleet-wide prefix) alone. Negation is preserved."""
+    return SPECIFIC_HOST_RE.sub(lambda m: f"{m.group(1)}host:=={m.group(2)}", query)
 
 # error | warn | off -- what to do when the tripwire sees an out-of-scope
 # host in a response. Defaults to error; downgrade to warn if a legitimate
@@ -294,7 +326,10 @@ SCOPE_ERROR = (
 
 
 def is_production_host(value: str) -> bool:
-    return value.strip().strip('"').lower().startswith(PROD_HOST_PREFIX)
+    # Tolerate the `==` exact-match prefix, which may already be present
+    # on a caller's clause or added by exactify_hosts.
+    cleaned = value.strip().strip('"').lstrip("=").strip('"').lower()
+    return cleaned.startswith(PROD_HOST_PREFIX)
 
 
 def find_out_of_scope_host(query: str | None) -> str | None:
@@ -325,7 +360,7 @@ def scope_query(query: str | None) -> str:
     intent explicit, and mean this does not silently become bypassable if
     Mezmo's parser precedence ever changes.
     """
-    query = (query or "").strip()
+    query = exactify_hosts((query or "").strip())
     if not query:
         return SCOPE_CLAUSE
     return f"({query}) {SCOPE_CLAUSE}"
