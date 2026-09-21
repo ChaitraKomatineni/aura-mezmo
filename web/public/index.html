@@ -352,38 +352,18 @@
     </div>
     <div id="fd-error" class="error"></div>
     <table>
-      <thead><tr><th>#</th><th>Subject</th><th>Status</th><th>Priority</th><th>Updated</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Subject</th><th>Status</th><th>Priority</th><th>Raised</th><th></th></tr></thead>
       <tbody id="fd-table"></tbody>
     </table>
 
-    <div class="inline-panel" id="fd-filter-panel">
-      <div class="title">Correlating ticket <b id="fd-filter-title"></b> &mdash; Aura searches the window top-down by severity; the ticket wording is used to judge the match, not to drive the search</div>
-      <div class="field">
-        <label>Extra keyword (optional &mdash; usually leave blank)</label>
-        <input id="fd-filter-keyword" placeholder="leave blank: operator wording rarely matches log text" />
-      </div>
-      <div class="row">
-        <div class="field">
-          <label>Start time (UTC)</label>
-          <input id="fd-filter-start" type="datetime-local" />
-        </div>
-        <div class="field">
-          <label>End time (UTC)</label>
-          <input id="fd-filter-end" type="datetime-local" />
-        </div>
-        <div class="field">
-          <label>Level</label>
-          <select id="fd-filter-level">
-            <option value="any">any level</option>
-            <option value="ERROR">ERROR</option>
-            <option value="WARN">WARN</option>
-            <option value="INFO">INFO</option>
-          </select>
-        </div>
-      </div>
-      <button class="primary" id="fd-filter-run">Run correlation</button>
-      <button class="small-btn" id="fd-filter-cancel">Cancel</button>
-    </div>
+    <!-- The correlation filter panel that used to live here is gone.
+         It asked for a keyword (which we deliberately no longer use --
+         operator wording is not log text), a level (the RCA method walks
+         all of them top-down anyway), and a time window computed in the
+         browser, which is what produced a five-hour-wrong search. All
+         three were a second click that only added ways to be wrong.
+         "Correlate with logs" now goes straight to chat, and the window
+         comes from the ticket's own fields, resolved server-side. -->
   </section>
 
   <!-- SKILLS -->
@@ -757,12 +737,6 @@ document.getElementById('live-ask').addEventListener('click', () => {
 const fdTable = document.getElementById('fd-table');
 const fdError = document.getElementById('fd-error');
 const fdListCaption = document.getElementById('fd-list-caption');
-const fdFilterPanel = document.getElementById('fd-filter-panel');
-const fdFilterTitle = document.getElementById('fd-filter-title');
-const fdFilterKeyword = document.getElementById('fd-filter-keyword');
-const fdFilterStart = document.getElementById('fd-filter-start');
-const fdFilterEnd = document.getElementById('fd-filter-end');
-const fdFilterLevel = document.getElementById('fd-filter-level');
 const fdDetailCache = {};
 
 const FD_STATUS = { 2: 'Open', 3: 'Pending', 4: 'Resolved', 5: 'Closed' };
@@ -783,13 +757,18 @@ function renderTicketRows(tickets) {
       '<td>' + (t.subject || '(no subject)') + '</td>' +
       '<td><span class="badge">' + (FD_STATUS[t.status] || t.status || '') + '</span></td>' +
       '<td><span class="badge">' + (FD_PRIORITY[t.priority] || t.priority || '') + '</span></td>' +
-      '<td>' + formatTimestamp(t.updated_at) + '</td>' +
+      // created_at, not updated_at. The column used to show updated_at,
+      // which on a bulk-resolved batch is the same timestamp for dozens of
+      // unrelated tickets and looks nothing like when the fault happened
+      // -- an August ticket displayed as 9/14. "Raised" is the triage-
+      // relevant date; the expanded View still shows both.
+      '<td>' + formatTimestamp(t.created_at) + '</td>' +
       '<td>' +
         '<button class="small-btn" data-action="view">View</button>' +
         '<button class="small-btn" data-action="correlate">Correlate with logs</button>' +
       '</td>';
     tr.querySelector('[data-action="view"]').addEventListener('click', () => toggleTicketDetail(t.id, tr));
-    tr.querySelector('[data-action="correlate"]').addEventListener('click', () => openFreshdeskFilters(t.id));
+    tr.querySelector('[data-action="correlate"]').addEventListener('click', () => correlateTicket(t.id));
     fdTable.appendChild(tr);
   }
 }
@@ -837,7 +816,6 @@ async function searchFreshdesk() {
   const q = document.getElementById('fd-query').value.trim();
   if (!q) return;
   fdError.textContent = '';
-  fdFilterPanel.classList.remove('open');
   fdListCaption.textContent = 'Searching...';
   const resp = await fetch('/api/freshdesk/search?q=' + encodeURIComponent(q));
   const data = await resp.json();
@@ -858,7 +836,6 @@ document.getElementById('fd-query').addEventListener('keydown', (e) => {
 async function loadRecentFreshdesk() {
   const days = document.getElementById('fd-recent-days').value;
   fdError.textContent = '';
-  fdFilterPanel.classList.remove('open');
   fdListCaption.textContent = 'Loading tickets from the last ' + days + ' day(s)...';
   const resp = await fetch('/api/freshdesk/recent?days=' + days);
   const data = await resp.json();
@@ -875,87 +852,46 @@ document.getElementById('fd-recent-load').addEventListener('click', loadRecentFr
 document.getElementById('fd-recent-days').addEventListener('change', loadRecentFreshdesk);
 loadRecentFreshdesk();
 
-// UTC, deliberately. The two inputs are labelled "(UTC)" and the prompt
-// sends their values as UTC, so they must not be filled with browser-local
-// time. They were: this read getHours() etc., so a browser in US Central
-// turned a 16:38Z ticket into a "11:08-12:08 UTC" window -- five hours
-// wrong. Ticket #7905 was investigated against an empty hour because of
-// it, and reported as "the robot was not producing logs", when the real
-// window held a FATAL at exactly the reported minute.
-function toUtcInputValue(date) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return date.getUTCFullYear() + '-' + pad(date.getUTCMonth() + 1) + '-' +
-    pad(date.getUTCDate()) + 'T' + pad(date.getUTCHours()) + ':' +
-    pad(date.getUTCMinutes());
-}
-
-async function openFreshdeskFilters(ticketId) {
-  fdFilterTitle.textContent = 'loading...';
-  fdFilterPanel.dataset.ticketId = ticketId;
-  fdFilterPanel.classList.add('open');
-
-  const resp = await fetch('/api/freshdesk/ticket/' + ticketId);
-  const t = await resp.json();
-  if (t.error) {
-    fdFilterTitle.textContent = 'Could not load ticket #' + ticketId;
-    fdFilterPanel.dataset.description = '';
-    fdFilterPanel.dataset.subject = '';
-    return;
+// One click: "Correlate with logs" goes straight to chat.
+//
+// No time window is computed here on purpose. Every browser-side attempt
+// at it has been wrong -- the last one labelled US-Central time as UTC
+// and sent Aura to an empty hour five hours off, which it then reported
+// as "the robot was not producing logs". The ticket already carries the
+// answer, and freshdesk-mcp resolves it server-side in rca_hints:
+// the operator's override window if filled, else the reporter's own
+// "Report Time:" line, converted from its stated zone. Aura reads that.
+//
+// The robot is passed through because it is a plain field (cf_robot_name)
+// with no parsing involved, and having it visible in the chat message
+// means you can see at a glance which machine is being investigated.
+async function correlateTicket(ticketId) {
+  let robot = null;
+  try {
+    const resp = await fetch('/api/freshdesk/ticket/' + ticketId);
+    const t = await resp.json();
+    if (!t.error) robot = t.robot || null;
+  } catch (e) {
+    // Non-fatal: Aura fetches the ticket itself anyway.
   }
 
-  fdFilterTitle.textContent = '#' + t.id + ' — ' + (t.subject || '');
-  fdFilterPanel.dataset.subject = t.subject || '';
-  fdFilterPanel.dataset.description = (t.description_text || '').slice(0, 400);
-
-  // Deliberately NOT prefilled from the subject any more. Tickets are
-  // written by operators describing a symptom in their own words, which
-  // rarely matches the log text -- seeding the search with that wording
-  // biases the whole RCA toward whatever the operator happened to call
-  // the thing. The severity ladder finds candidates; the ticket wording
-  // is then used to judge whether a candidate fits.
-  fdFilterKeyword.value = '';
-
-  // Prefill a window around when the ticket was created — editable.
-  const created = t.created_at ? new Date(t.created_at) : new Date();
-  const start = new Date(created.getTime() - 30 * 60 * 1000);
-  const end = new Date(created.getTime() + 30 * 60 * 1000);
-  fdFilterStart.value = toUtcInputValue(start);
-  fdFilterEnd.value = toUtcInputValue(end);
-  fdFilterLevel.value = 'any';
-}
-
-document.getElementById('fd-filter-cancel').addEventListener('click', () => {
-  fdFilterPanel.classList.remove('open');
-});
-
-document.getElementById('fd-filter-run').addEventListener('click', () => {
-  const ticketId = fdFilterPanel.dataset.ticketId;
-  const subject = fdFilterPanel.dataset.subject;
-  const description = fdFilterPanel.dataset.description;
-  const keyword = fdFilterKeyword.value.trim();
-  const start = fdFilterStart.value;
-  const end = fdFilterEnd.value;
-  const level = fdFilterLevel.value;
-  const levelPhrase = level === 'any' ? 'any level' : level + '-level';
-
-  // Ask for the top-down RCA method rather than a keyword hunt. The
-  // ticket text is supplied LAST and explicitly framed as something to
-  // test candidates against, not to search for.
-  let prompt = 'Root-cause Freshdesk ticket #' + ticketId + '.';
-  if (start && end) prompt += ' Window: ' + start + ' to ' + end + ' (UTC).';
-  prompt += ' Work top-down by severity: FATAL, then CRITICAL, then ERROR, then WARN.' +
-    ' Do not search for the operator\'s wording.';
-  if (level !== 'any') prompt += ' Start at ' + levelPhrase + ' rather than the top.';
-  if (keyword) prompt += ' The user additionally asked to consider "' + keyword + '".';
-  prompt += ' Only once you have candidate events, compare them against the ticket' +
-    ' text below and say plainly whether they explain the reported symptom.' +
-    ' Quote the exact log lines and cite the ticket number.';
-  prompt += '\n\nTicket subject: "' + subject + '"';
-  if (description) prompt += '\nTicket description: "' + description + '"';
+  let prompt = 'Root-cause Freshdesk ticket #' + ticketId +
+    (robot ? ' (' + robot + ')' : '') + '.\n\n' +
+    'Call freshdesk_get_ticket first and take the robot and the failure ' +
+    'window from its rca_hints — window_start_utc and window_end_utc. Do ' +
+    'not use created_at, which is when the ticket was filed rather than ' +
+    'when the fault happened.\n\n' +
+    'Then work top-down by severity within that window: FATAL, CRITICAL, ' +
+    'ERROR, WARN. Do not search for the operator\'s wording — it is a ' +
+    'symptom described in their own words, not log text.\n\n' +
+    'Only once you have candidate events, compare them with the ticket ' +
+    'text and say plainly whether they explain the reported symptom, or ' +
+    'whether nothing in that window does. Quote the exact log lines with ' +
+    'timestamps, state the absolute UTC window you searched, and cite the ' +
+    'ticket number.';
 
   sendChat(prompt);
-  fdFilterPanel.classList.remove('open');
-});
+}
 
 // ---------- Skills ----------
 const skillsList = document.getElementById('skills-list');

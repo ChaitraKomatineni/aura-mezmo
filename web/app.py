@@ -336,6 +336,10 @@ def freshdesk_ticket(ticket_id: int):
     except httpx.HTTPError as e:
         return JSONResponse({"error": f"Could not reach Freshdesk: {e}"})
 
+    custom = {
+        k: v for k, v in (ticket.get("custom_fields") or {}).items()
+        if v not in (None, "", [])
+    }
     return {
         "id": ticket.get("id"),
         "subject": ticket.get("subject"),
@@ -345,6 +349,14 @@ def freshdesk_ticket(ticket_id: int):
         "tags": ticket.get("tags"),
         "created_at": ticket.get("created_at"),
         "updated_at": ticket.get("updated_at"),
+        "custom_fields": custom,
+        # Convenience only. The failure WINDOW is deliberately not computed
+        # here: freshdesk-mcp's rca_hints already resolves it server-side
+        # (preferring the operator's override window, else the reporter's
+        # own "Report Time:" line, with proper zone conversion), and the
+        # agent reads it from there. Doing date maths in the browser is
+        # what produced a five-hour-wrong window before.
+        "robot": custom.get("cf_robot_name"),
     }
 
 
