@@ -64,46 +64,72 @@ PORT = int(os.environ.get("PORT", "8093"))
 # form and already matches every gen1-prod* host.
 PROD_HOST_PREFIX = "gen1-prod"
 
-# Noise is suppressed PER APP AND LEVEL, not by dropping a level globally.
+# Levels dropped for EVERY app. DEBUG is ~80% of fleet volume and, having
+# gone through it app by app, the parts worth keeping were not worth the
+# cost: at 10,807,838 lines/day a fleet-wide hour sits comfortably inside
+# Mezmo's 1,000,000-line query ceiling, whereas keeping planner DEBUG put
+# it at ~1.7M an hour and had the expensive tools rejected outright.
 #
-# An earlier version excluded `-level:debug` fleet-wide. That is a blunter
-# instrument than it looks: DEBUG is where path_planning, action_planning
-# and vision do their actual reasoning, and dropping all of it discards
-# 28M lines/day of genuinely diagnostic content to silence two chatty
-# loops. Measured fleet-wide on Fri 2026-09-18, the DEBUG that a global
-# rule was throwing away:
+# For the record, since this was arrived at by measurement rather than
+# assumption -- DEBUG by app, fleet-wide, Fri 2026-09-18:
 #
-#     fastloop          63,312,922     <- the actual noise
-#     path_planning     13,075,160     <- diagnostic, was being lost
-#     action_planning   12,128,697     <- diagnostic, was being lost
-#     vision             3,121,594     <- diagnostic, was being lost
-#     taskloop           1,527,692     <- noise
+#     fastloop          63,312,922
+#     path_planning     13,075,160
+#     action_planning   12,128,697
+#     vision             3,121,594
+#     taskloop           1,527,692
 #     camera / navigation / api-server / safety_interface /
-#     scan_perception / pickle_rosbridge / motor_controller  ~700k combined
+#     scan_perception / motor_controller             ~700k combined
 #
-# So the rule is now per-app. fastloop is the one app whose INFO is also
-# pure telemetry (an 83Hz control loop), so it loses both levels; taskloop
-# loses only DEBUG; pickle_rosbridge keeps the INFO rule it already had.
+# The consequence to keep in mind is that nothing explains itself at DEBUG
+# any more. If a WARN/ERROR alone does not account for something, the
+# answer is not in this view at all -- config/aura.toml tells the agent to
+# say so rather than to infer from absence.
+GLOBAL_LEVEL_EXCLUSIONS = ("debug",)
+
+# Additional levels dropped for specific apps, on top of the global rule.
+# Only INFO entries remain: DEBUG is handled globally above, so the
+# taskloop and vision entries that used to live here would now be dead
+# weight and are gone. These three are high-rate loop telemetry whose INFO
+# is not events -- measured INFO volume fleet-wide on the same day:
 #
-# Cost of being less blunt, measured on the same day fleet-wide: the agent
-# now sees 39,947,618 lines/day instead of 10,807,838 -- 3.7x more. See
-# SCOPE_CLAUSE below for why that matters for the 1,000,000-line cap.
+#     fastloop         5,095,097   (an 83Hz control loop)
+#     action_planning  5,737,545
+#     path_planning      462,788
 #
-# NOTE for fastloop specifically: because essentially all of its non-DEBUG
-# output is INFO, excluding both levels removes fastloop from the agent's
-# view almost entirely. config/aura.toml says so explicitly, so the agent
-# reports "fastloop's routine logging is filtered out of this view" rather
-# than concluding fastloop was idle.
+# NOTE for fastloop and action_planning: with both DEBUG and INFO gone,
+# almost nothing of either survives -- roughly 5,000 and 45,000 lines a day
+# respectively. config/aura.toml warns about both by name, so the agent
+# reports "its routine logging is filtered out of this view" rather than
+# concluding the subsystem was idle. path_planning keeps ~1.14M lines/day
+# because much of its output carries no level at all.
 #
 # Matching is by prefix (Mezmo does this automatically), so `app:fastloop`
 # would also catch a future `fastloop2`. There is no fastloop2 in
 # production today -- `host:gen1-prod app:fastloop2` returns 0 -- but if one
 # ships, it inherits this suppression without anyone deciding that.
 APP_LEVEL_EXCLUSIONS = {
-    "fastloop": ("debug", "info"),
-    "taskloop": ("debug",),
-    "pickle_rosbridge": ("info",),
+    "fastloop": ("info",),
+    "path_planning": ("info",),
+    "action_planning": ("info",),
 }
+
+# Apps removed in full, at every level. This is stronger than the
+# problems-only gate below, which keeps ERROR/FATAL: nothing at all from
+# these apps reaches the agent.
+#
+# pickle_rosbridge measured fleet-wide on Fri 2026-09-18 -- 2,839,922
+# lines/day, of which 1,478,661 INFO, 13,214 WARN, 10,253 DEBUG, 466 ERROR,
+# 6 FATAL/CRITICAL and ~1.34M carrying no level at all. It runs Foxglove /
+# ROS diagnostics and the mobile-base LIDAR drivers, i.e. a visualisation
+# and bridging layer rather than robot behaviour.
+#
+# The 466 errors and 6 fatals a day go too, and that is the deliberate
+# difference from LEVEL_GATED_APPS. If a rosbridge fault ever needs
+# investigating it will be invisible here and has to be queried outside
+# this proxy -- config/aura.toml tells the agent to say so rather than
+# report that there were none.
+FULLY_EXCLUDED_APPS = ("pickle_rosbridge",)
 
 
 # Apps that are operationally irrelevant to robot/arm/safety triage and are
@@ -217,6 +243,16 @@ def _known_benign_clause(entries) -> str:
     )
 
 
+def _global_level_clause(levels: tuple[str, ...]) -> str:
+    """`-level:debug` -- dropped for every app."""
+    return " ".join(f"-level:{lv}" for lv in levels)
+
+
+def _full_exclusion_clause(apps: tuple[str, ...]) -> str:
+    """`-app:x -app:y` -- drop these apps entirely, every level."""
+    return " ".join(f"-{_app_term(a)}" for a in apps)
+
+
 def _app_level_clause(exclusions: dict[str, tuple[str, ...]]) -> str:
     """One `-(app:X (level:a OR level:b))` per app, ANDed together.
 
@@ -242,23 +278,30 @@ def _app_level_clause(exclusions: dict[str, tuple[str, ...]]) -> str:
 # AND-ed into every query. Order is irrelevant (whitespace is AND in Mezmo's
 # syntax). Measured fleet-wide on Fri 2026-09-18:
 #   host:gen1-prod                        -> 120,767,854  (raw)
-#   ... plus the per-app level clause     ->  ~40,700,000
-#   ... plus the level-gate clause        ->   39,947,618  (33.1% of raw)
+#   ... plus the per-app level clause     ->  ~9,300,000
+#   ... plus the level-gate clause        ->    8,543,428  (7.1% of raw)
 #
-# NOTE, and this is the trade-off of keeping DEBUG: the previous global
-# `-level:debug` rule left 10,807,838 lines/day. Per-app leaves 39,947,618
-# -- 3.7x more. Mezmo refuses any query matching over 1,000,000 lines, so
+# That averages ~356,000 lines/hour fleet-wide against Mezmo's
+# 1,000,000-line query ceiling, but the average is the wrong number to
+# reason from: the busiest measured hour (14:00-15:00 on that day) is
+# 1,007,004 lines and IS still rejected with "Query Too Large" -- 0.7%
+# over. So a fleet-wide hour sits exactly on the boundary: it works in
+# quiet hours and fails in busy ones. Scoping to one robot is what makes
 # `deduplicate_*`, `analyze_logs_for_root_cause_*` and
-# `get_correlated_timeline_*` now hit that cap on windows where they
-# previously did not. Fleet-wide that is roughly 1.7M lines/hour against a
-# 1M ceiling, i.e. sub-hour windows only; scoped to one robot it is well
-# under. The system prompt already tells the agent to narrow to one robot
-# before reaching for those tools, which is now load-bearing rather than
-# merely good practice.
+# `get_correlated_timeline_*` reliable, and the system prompt says so.
+#
+# Separately, and easy to mistake for the cap: these three tools also fail
+# intermittently with "SSE stream ended without a response" regardless of
+# volume -- a 5-minute single-robot window hits it. That is the documented
+# TRANSIENT_SSE_DROP from experiments/mcp-tool-behavior and the remedy is
+# to retry the identical arguments, NOT to narrow the query. Reading one
+# as the other leads to narrowing a query that was never too large.
 SCOPE_CLAUSE = " ".join(
     part
     for part in (
         f"host:{PROD_HOST_PREFIX}",
+        _global_level_clause(GLOBAL_LEVEL_EXCLUSIONS),
+        _full_exclusion_clause(FULLY_EXCLUDED_APPS),
         _app_level_clause(APP_LEVEL_EXCLUSIONS),
         _level_gate_clause(LEVEL_GATED_APPS, KEEP_LEVELS),
         _known_benign_clause(KNOWN_BENIGN),
@@ -654,7 +697,11 @@ class DescribeScopeTool(Tool):
         payload = {
             "injected_clause": SCOPE_CLAUSE,
             "production_hosts": f"{PROD_HOST_PREFIX}* (exact-matched per robot)",
-            "app_level_exclusions": {a: list(lv) for a, lv in APP_LEVEL_EXCLUSIONS.items()},
+            "levels_excluded_for_every_app": list(GLOBAL_LEVEL_EXCLUSIONS),
+            "apps_excluded_entirely": list(FULLY_EXCLUDED_APPS),
+            "additional_app_level_exclusions": {
+                a: list(lv) for a, lv in APP_LEVEL_EXCLUSIONS.items()
+            },
             "apps_gated_to_problems_only": list(LEVEL_GATED_APPS),
             "levels_kept_for_gated_apps": list(KEEP_LEVELS),
             "suppressed_known_benign": [
@@ -662,7 +709,13 @@ class DescribeScopeTool(Tool):
             ],
             "tools_exposed": sorted(ALLOWLIST),
             "notes": [
-                "DEBUG is available except where app_level_exclusions says otherwise.",
+                "Apps in apps_excluded_entirely are gone at EVERY level, "
+                "including ERROR and FATAL -- stronger than the problems-only "
+                "gate. You cannot see them at all.",
+                "DEBUG is excluded for EVERY app. Nothing explains itself at "
+                "DEBUG in this view -- if a WARN/ERROR does not account for "
+                "something, say the detail is outside this view rather than "
+                "inferring from its absence.",
                 "Apps with no `level` field at all (audit, kernel, kern.log, "
                 "auth.log) are removed entirely by the problems-only gate -- "
                 "you cannot see them, which is not the same as them being empty.",
