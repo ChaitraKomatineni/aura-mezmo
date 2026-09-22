@@ -64,7 +64,6 @@ fastloop's ~83Hz, roughly 8x coarser. Cross-reference `fastloop`.
 
 | Reason | Live volume |
 |---|---|
-| `GRIPPER_BREAKAWAY` | **`[VERIFIED 180,245/day]`** — by far the most common; do not assume a breakaway is rare |
 | `ARM_STOPPED` | `[VERIFIED 3,134/day]` |
 | `RADAR_ESTOPPED` | `[VERIFIED 116/day]` |
 | `FRONT_LIDAR_ESTOPPED` | `[VERIFIED 109/day]` |
@@ -88,11 +87,32 @@ PackageStatus.FAILED_PLACE [DROPPED]                  [CONFIRMED]
 DROPPED_ON_CONVEYOR                                   [VERIFIED 19,540/day]
 No ranger depth received for package <UUID>           [CONFIRMED]
 Starting container: container label is <LABEL>        [CONFIRMED — INFO; session start]
+Continuing container: container label is <LABEL>      [VERIFIED — INFO; session resumed]
 Ending container: container label is <LABEL>          [CONFIRMED — INFO; session end]
 ```
 
 **Its INFO survives the filters deliberately**: the container start/stop markers are the
 only reliable way to find where a session began and ended.
+
+**But a session label retrieves only those markers — never the session itself.**
+`session_label` and `session_id` exist as real indexed fields, and they are written
+**only** when an operator creates or closes a session. Everything the robot actually
+did carries neither. On a measured real session (`CMAU6379806`, gen1-prod2):
+`session_label:==CMAU6379806` → **10 lines**; the session's actual activity →
+thousands of lines, **none of them labelled**. Fleet-wide only ~42 lines/day carry
+the field at all.
+
+So use the label exactly once, to read the start and stop timestamps, then **drop it
+and query by `host` + time window.** If you leave the label in the query you will get
+a handful of lines and may wrongly report that the session was empty — a false
+negative about a physical machine. A near-empty label result means the query was
+wrong, not that the robot was idle.
+
+Two related traps: a session can run 20+ hours and cross midnight (the `CMAU6379806`
+session ran 14:28Z → 12:38Z the next day), so a start and end on different dates is
+normal. And free-text searching the label instead of the field matches the container
+number wherever it is embedded in JSON payloads — mostly DEBUG lines that the filters
+drop — so it looks like a hit count without being usable evidence.
 
 Note `DROPPED_ON_CONVEYOR` `[VERIFIED 19,540/day]` and fastloop's
 `PACKAGE_DROPPED_ON_CONVEYOR` `[VERIFIED 1,900/day]` are **different strings with
@@ -298,6 +318,7 @@ a query on them.
 ```
 app:task            partial / prefix match — app:task also matches taskloop
 host:gen1-prod2     the proxy rewrites this to an exact match for you; just write it normally
+field:==value       force an exact match — needed on app:, source:, session_label:
 (a OR b)            explicit OR, spaces inside the parens
 a b                 whitespace is AND
 -"exact phrase"     exclude
@@ -305,9 +326,30 @@ field:*             field exists — the ONLY valid use of *
 ```
 
 Wildcards are **not** supported in values. `app:fastloop*` is invalid; prefix matching
-is automatic.
+is automatic. The proxy only exact-matches `host:` — on every other string field you
+must write `==` yourself, or a name that is a prefix of a sibling's silently sweeps the
+sibling in (`session_label:CMAU` matched 22 lines across several containers where
+`session_label:==CMAU6379806` matched 10).
+
+**Never scope an investigation by `session_label` or `session_id`.** They are written
+only when an operator opens or closes a session, so they identify *boundaries*, not
+contents — see `taskloop` above. Read the boundary timestamps, then query by `host` and
+time window.
 
 ## Recipes
+
+**Reconstructing a session from its label** (do this before any other recipe when the
+user names a session/container)
+1. `app:taskloop level:info "Starting container"` + the label → read the timestamp.
+2. `app:taskloop level:info "Ending container"` + the label → read the timestamp. If
+   there is no end yet, the session is still open; if the end is on the next calendar
+   day, that is normal.
+3. **Discard the label.** Every subsequent query is `host:==<robot>` with
+   `from_time`/`to_time` set to that window and nothing else carried over.
+4. Only now pick the recipe that matches the question.
+
+Step 3 is the one that gets skipped. Carrying the label forward returns almost nothing,
+because the work of a session is not labelled.
 
 **Arm / safety incident (E-stop, intervention, unexpected stop)**
 1. `safety_interface` — the state transition and reason code (ground truth)

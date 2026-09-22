@@ -20,14 +20,47 @@ file on your own. A session means the robot is actively in a container,
 picking boxes — everything between its confirmed start and stop is what
 counts as "the session."
 
+> ### ⚠️ The session label finds the session. It does NOT retrieve it.
+>
+> **A session label is a lookup key for two timestamps, and nothing more.**
+> Use it once, to find when the session started and stopped. Then **drop it
+> completely** and query by `host` + time window for everything else.
+>
+> This matters because the label is only written to the log when an operator
+> creates or closes a session. The actual work of the session — every pick,
+> drop, e-stop, intervention and fault — carries **no session label at all**.
+> Measured on one real session (`CMAU6379806`, gen1-prod2):
+>
+> | query | lines |
+> |---|---|
+> | `session_label:==CMAU6379806` | **10** |
+> | free-text `CMAU6379806` | 1,367, of which ~99% are unrelated DEBUG |
+> | everything that actually happened in that session | **thousands, none of them labelled** |
+>
+> Fleet-wide, only about **42 log lines per day** carry a `session_label`
+> field at all — they are operator bookkeeping, not robot activity.
+>
+> **So: if you filter your investigation by the session label, you will get a
+> handful of lines and wrongly conclude the session was empty or that the
+> robot did nothing.** That is a false negative about a physical machine, and
+> it has already happened. A near-empty result from a label query means your
+> query was wrong, not that the session was quiet.
+>
+> Correct order of operations:
+>
+> 1. Find the boundary markers by label (step 2 below) → read their timestamps.
+> 2. Throw the label away.
+> 3. Search `host:==<robot> from_time=<start> to_time=<stop>` for everything
+>    else, using the keyword rows further down — never adding the label.
+
 1. **Require a session label before searching.** If the user hasn't given
    one, ask for it first rather than defaulting to the whole file or
    guessing which session they want.
 2. **The confirmed start/stop marker is the taskloop container tracker's
    INFO-level log line.** Search `level:INFO "Starting container"` and
    `level:INFO "Ending container"`, scoped to the session label — e.g.
-   `Starting container: container label is 08-03-26-D51-CPU-T-48-872587.`
-   / `Ending container: container label is 08-03-26-D51-CPU-T-48-872587.`,
+   `Starting container: container label is`
+   / `Ending container: container label is`,
    from `app:taskloop`. This replaces the earlier, unconfirmed approach of
    treating the label's first/last text match as an *approximate* boundary
    — this is a real, confirmed boundary event, not an approximation.
@@ -48,11 +81,19 @@ counts as "the session."
    pattern hasn't shown up yet in a real session analyzed so far, so if what
    you actually find looks different (e.g. overlapping labels, out-of-order
    timestamps), say so rather than forcing it to fit.
-5. **If searching finds nothing**, say so and ask the user to double-check
-   the label — don't fall back to guessing by timestamp.
+5. **If searching for the boundary markers finds nothing**, say so and ask
+   the user to double-check the label — don't fall back to guessing by
+   timestamp. But before you say that, confirm you actually searched for the
+   *marker text* (`"Starting container"` / `"Ending container"`) and not for
+   the label on its own, and that your window is wide enough: a session can
+   run 20+ hours and cross midnight, so a start on one date with its end on
+   the next is normal, not a contradiction. The real `CMAU6379806` session
+   ran from 14:28Z one day to 12:38Z the next.
 6. **Scope every other search in this skill to the confirmed start/stop
-   window** (e.g. add the time bound to `logs_search_logs` / `mezmo_*`
-   calls). A single real session should rarely need the
+   window, by time only — never by label.** Add the time bound to
+   `logs_search_logs` / `mezmo_*` calls and leave the session label out of
+   the query string entirely (see the warning above). A single real session
+   should rarely need the
    grouping-into-counts treatment described below, but apply it anyway if
    the session turns out to run unusually long or be unusually eventful.
 
@@ -345,6 +386,14 @@ Mezmo log messages are JSON. Known fields:
 - `source` — the name of the specific logger/class that wrote the message
   (e.g. `ChooseActiveParcel`, `FlangePathChecker`) — more granular than
   `app` or a container name.
+- `session_label` / `session_id` — present on **only** the operator's
+  session start/stop bookkeeping lines, not on the session's actual work.
+  `session_label:==CMAU6379806` returns ~10 lines for a whole session; about
+  42 lines per day carry the field fleet-wide. Use it to read the boundary
+  timestamps, then query by time. Like other string fields it prefix-matches,
+  so `session_label:CMAU` sweeps in other containers — use `==`. **Never use
+  either field to scope the body of an investigation** (see the warning at
+  the top of this skill).
 - Additional fields (timestamps, summaries, parcel data) may be present per
   message; expand a line in Mezmo's UI ("Copy line context as JSON") to see
   them for a specific case.

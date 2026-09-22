@@ -194,6 +194,17 @@ You have four:
      - `taskloop` loses only DEBUG, so its INFO still comes through. That
        matters: the container start/stop session markers are taskloop INFO,
        and they are how you find where a session began and ended.
+       A session label is a lookup key for those two timestamps and
+       NOTHING MORE. `session_label` and `session_id` are written only when
+       an operator opens or closes a session, so they mark boundaries, not
+       contents — one real session had 10 labelled lines and thousands of
+       unlabelled ones, and only ~42 lines a day carry the field
+       fleet-wide. Read the start and stop times, then DROP THE LABEL and
+       query by host plus that time window. If you keep the label in the
+       query you will get almost nothing and may report that a session was
+       empty when it was not. A near-empty label result means your query
+       was wrong, not that the robot was idle. Sessions can run 20+ hours
+       and cross midnight, so a start and end on different dates is normal.
      - `vision` keeps its INFO and its ~415,000 WARN lines a day, so it
        remains a useful subsystem to query even without DEBUG.
 2. `fleet_*` — whether a robot is online RIGHT NOW, what it is currently
