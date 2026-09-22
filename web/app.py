@@ -13,15 +13,23 @@ Small FastAPI app serving the single-page UI plus four backend concerns:
                                 it's live in chat — the UI says so.
   - /api/chat                — pass-through streaming proxy to Aura's
                                 OpenAI-compatible /v1/chat/completions
+  - /api/reports             — append-only bug reports from the "Report a
+                                problem" button in chat. Each one stores the
+                                full turn, including every tool call's exact
+                                arguments, because that's where the fault
+                                almost always is. Written to
+                                reports/reports.jsonl on the host.
 
 The Aura agent itself reaches uploaded logs, live Mezmo logs, and
 Freshdesk tickets through its own MCP tool servers (see config/aura.toml);
 this app's Freshdesk/logs endpoints are for human browsing in the UI.
 """
 
+import json
 import os
 import re
 import shutil
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,9 +46,16 @@ UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
 FRESHDESK_DOMAIN = os.environ.get("FRESHDESK_DOMAIN", "")
 FRESHDESK_API_KEY = os.environ.get("FRESHDESK_API_KEY", "")
 SKILLS_DIR = Path(os.environ.get("SKILLS_DIR", "/app/skills"))
+REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "/data/reports"))
+
+# Append-only. Bind-mounted to ./reports on the host in docker-compose.yml
+# rather than a named volume, so whoever runs the machine can read and grep
+# the file directly without going through Docker.
+REPORTS_FILE = REPORTS_DIR / "reports.jsonl"
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def freshdesk_base_url() -> str:
@@ -358,6 +373,152 @@ def freshdesk_ticket(ticket_id: int):
         # what produced a five-hour-wrong window before.
         "robot": custom.get("cf_robot_name"),
     }
+
+
+# ── Bug reports ──────────────────────────────────────────────────────
+# A teammate who gets a wrong answer clicks "Report a problem" on that
+# message. What makes the report worth keeping is not the question they
+# typed -- it's the queries AURA sent. Nearly every failure in this stack
+# so far has been a wrong time window or an over-broad field match, both
+# of which are invisible in the final answer and obvious in `arguments`.
+# The browser already receives those from the aura.tool_requested events,
+# so the report carries the whole turn.
+
+MAX_RESULT_CHARS = 4000
+
+
+class ReportedToolCall(BaseModel):
+    tool_name: str = Field(..., max_length=128)
+    # The RCA payload: the exact query, from_time and to_time that went out.
+    arguments: dict | None = None
+    success: bool | None = None
+    duration_ms: int | None = None
+    # Deliberately unbounded here and clipped on write instead. A length
+    # limit would make Pydantic reject the whole request, which means one
+    # oversized log payload silently costs you the entire bug report --
+    # the opposite of what this feature is for. Clip, never refuse.
+    result: str | None = None
+    result_chars: int | None = None
+    error: str | None = None
+
+
+class ReportCreate(BaseModel):
+    category: str = Field(..., max_length=64)
+    note: str | None = None
+    # No login exists, so this is self-declared and unverified -- it tells
+    # you who to go ask, not who to hold responsible. Same reasoning as
+    # the skill `author` field above.
+    reporter: str | None = Field(None, max_length=128)
+    question: str
+    answer: str | None = None
+    reasoning: str | None = None
+    tool_calls: list[ReportedToolCall] = []
+    session_id: str | None = Field(None, max_length=128)
+    model: str | None = Field(None, max_length=128)
+    usage: dict | None = None
+
+
+# Field -> characters kept. Anything longer is cut with a marker so a
+# reader can tell a clipped value from a short one.
+CLIP_LIMITS = {
+    "question": 16000,
+    "answer": 64000,
+    "reasoning": 32000,
+    "note": 4000,
+    "error": 2048,
+}
+
+
+def clip(text, limit: int):
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[clipped]"
+
+
+def append_report_line(record: dict) -> None:
+    with REPORTS_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+@app.post("/api/reports")
+def create_report(payload: ReportCreate):
+    record = payload.model_dump()
+    record.update(
+        {
+            "type": "report",
+            "id": uuid.uuid4().hex[:12],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    for field, limit in CLIP_LIMITS.items():
+        if field in record:
+            record[field] = clip(record[field], limit)
+    for call in record.get("tool_calls") or []:
+        call["result"] = clip(call.get("result"), MAX_RESULT_CHARS)
+        call["error"] = clip(call.get("error"), CLIP_LIMITS["error"])
+    append_report_line(record)
+    return {"id": record["id"], "created_at": record["created_at"]}
+
+
+@app.get("/api/reports")
+def list_reports(limit: int = Query(200, ge=1, le=2000)):
+    """Newest first, with status lines folded onto the reports they mark.
+
+    The file is append-only -- resolving a report writes a `status` line
+    rather than rewriting history, so the original report and the fact
+    that someone triaged it both survive.
+    """
+    if not REPORTS_FILE.exists():
+        return {"reports": [], "total": 0}
+
+    reports: dict[str, dict] = {}
+    statuses: dict[str, dict] = {}
+    for line in REPORTS_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # A half-written line (killed mid-append) shouldn't break the
+            # whole tab -- skip it and keep reading.
+            continue
+        if row.get("type") == "status" and row.get("report_id"):
+            statuses[row["report_id"]] = row
+        elif row.get("id"):
+            reports[row["id"]] = row
+
+    for rid, status in statuses.items():
+        if rid in reports:
+            reports[rid]["status"] = status.get("status", "open")
+            reports[rid]["status_at"] = status.get("created_at")
+            reports[rid]["status_by"] = status.get("by")
+
+    rows = sorted(
+        reports.values(), key=lambda r: r.get("created_at", ""), reverse=True
+    )
+    return {"reports": rows[:limit], "total": len(rows)}
+
+
+class ReportStatus(BaseModel):
+    status: str = Field(..., pattern="^(open|resolved)$")
+    by: str | None = Field(None, max_length=128)
+
+
+@app.post("/api/reports/{report_id}/status")
+def set_report_status(report_id: str, payload: ReportStatus):
+    if not re.fullmatch(r"[0-9a-f]{1,32}", report_id):
+        raise HTTPException(400, "Invalid report id.")
+    append_report_line(
+        {
+            "type": "status",
+            "report_id": report_id,
+            "status": payload.status,
+            "by": payload.by,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return {"id": report_id, "status": payload.status}
 
 
 @app.post("/api/chat")

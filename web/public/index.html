@@ -226,6 +226,28 @@
   }
   .restart-banner.show { display: block; }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; }
+  .report-bar { margin-top: 6px; }
+  .report-bar > .small-btn { font-size: 11px; padding: 2px 8px; opacity: 0.7; }
+  .report-bar > .small-btn:hover { opacity: 1; }
+  .report-form { display: none; margin-top: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+  .report-form.open { display: block; }
+  .report-form select, .report-form textarea, .report-form input {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 6px 8px;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; font-family: inherit; font-size: 13px;
+  }
+  .report-hint { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .report-status { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .report-status.error { color: var(--danger); }
+  .report-row { border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 10px; }
+  .report-row.resolved { opacity: 0.55; }
+  .report-meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .report-q { font-size: 13px; margin-bottom: 6px; }
+  .report-note { font-size: 13px; color: var(--muted); font-style: italic; margin-bottom: 8px; }
+  .report-detail { display: none; margin-top: 8px; }
+  .report-detail.open { display: block; }
+  .report-call { font-family: var(--font-mono); font-size: 11px; border-left: 2px solid var(--border); padding: 4px 0 4px 8px; margin-bottom: 6px; white-space: pre-wrap; word-break: break-all; }
+  .report-call.failed { border-left-color: var(--danger); }
 </style>
 </head>
 <body>
@@ -237,6 +259,7 @@
   <button data-tab="live">Live Logs</button>
   <button data-tab="freshdesk">Freshdesk Bugs</button>
   <button data-tab="skills">Skills</button>
+  <button data-tab="reports">Reports</button>
   <button class="small-btn" id="theme-toggle">Dark mode</button>
 </nav>
 
@@ -407,6 +430,27 @@
     </div>
   </section>
 
+  <!-- REPORTS -->
+  <section class="panel" id="panel-reports">
+    <h2>Reported problems</h2>
+    <div class="hint">Every report saved from the &ldquo;Report a problem&rdquo; button in chat. Each one keeps the full turn &mdash; including the exact query and time window Aura sent for every tool call, which is usually where the fault is. Stored append-only in <code>reports/reports.jsonl</code> on this machine.</div>
+    <div class="row" style="align-items:flex-end;">
+      <div class="field" style="max-width:200px;">
+        <label>Show</label>
+        <select id="reports-filter">
+          <option value="open" selected>Open only</option>
+          <option value="all">All</option>
+          <option value="resolved">Resolved only</option>
+        </select>
+      </div>
+      <div class="field" style="flex:0;">
+        <button class="small-btn" id="reports-refresh">Refresh</button>
+      </div>
+      <div class="field" style="flex:1;"><div class="report-meta" id="reports-count"></div></div>
+    </div>
+    <div id="reports-list"></div>
+  </section>
+
 </main>
 
 <script>
@@ -416,7 +460,10 @@ function showTab(name) {
   tabs.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   panels.forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
 }
-tabs.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+tabs.forEach(b => b.addEventListener('click', () => {
+  showTab(b.dataset.tab);
+  if (b.dataset.tab === 'reports') loadReports();
+}));
 
 // ---------- Theme ----------
 const themeToggle = document.getElementById('theme-toggle');
@@ -484,9 +531,18 @@ function addAssistantMessage() {
   chatLog.appendChild(wrapper);
   chatLog.scrollTop = chatLog.scrollHeight;
 
+  // Everything a bug report needs, accumulated as the events arrive. The
+  // rendered steps above are lossy on purpose (a step line shows a tool
+  // name, not its arguments); this keeps the structured version, because
+  // the arguments are what an RCA actually needs.
+  const record = {
+    question: null, answer: null, reasoning: '',
+    tool_calls: [], session_id: null, model: null, usage: null,
+  };
+
   let stepCount = 0;
   return {
-    wrapper, content,
+    wrapper, content, record,
     addStep(label, cls) {
       steps.style.display = 'block';
       stepCount += 1;
@@ -539,6 +595,11 @@ function handleSseLines(lines, msg, state) {
 
     if (eventType === 'aura.tool_requested') {
       msg.addStep('Calling ' + json.tool_name + '...', 'tool');
+      msg.record.tool_calls.push({
+        tool_id: json.tool_id,
+        tool_name: json.tool_name,
+        arguments: json.arguments ?? null,
+      });
     } else if (eventType === 'aura.tool_complete') {
       const failed = json.success === false;
       msg.addStep(
@@ -547,13 +608,38 @@ function handleSseLines(lines, msg, state) {
           (failed && json.error ? ': ' + json.error : ''),
         'tool ' + (failed ? 'failure' : 'success')
       );
+      // Match on tool_id, not tool_name -- the same tool is often called
+      // several times in one turn with different windows, and pairing by
+      // name would attach the result to the wrong call.
+      const call = msg.record.tool_calls.find(c => c.tool_id === json.tool_id)
+        || msg.record.tool_calls[msg.record.tool_calls.length - 1];
+      if (call) {
+        call.success = json.success !== false;
+        call.duration_ms = json.duration_ms ?? null;
+        call.error = json.error ? String(json.error).slice(0, 2048) : null;
+        const res = json.result == null ? null : String(json.result);
+        if (res !== null) {
+          call.result_chars = res.length;
+          call.result = res.length > 4000 ? res.slice(0, 4000) : res;
+        }
+      }
     } else if (eventType === 'aura.reasoning') {
       if (!state.reasoningLine) state.reasoningLine = msg.addStep('', 'reasoning');
       state.reasoningLine.textContent += json.content || '';
+      msg.record.reasoning += json.content || '';
+    } else if (eventType === 'aura.session_info') {
+      msg.record.session_id = json.session_id ?? null;
+      msg.record.model = json.model ?? null;
+    } else if (eventType === 'aura.usage') {
+      msg.record.usage = {
+        prompt_tokens: json.prompt_tokens ?? null,
+        completion_tokens: json.completion_tokens ?? null,
+        total_tokens: json.total_tokens ?? null,
+      };
     }
-    // aura.progress / aura.session_info / aura.mcp_status / aura.tool_usage /
-    // aura.usage / aura.scratchpad_usage / approval events: not rendered
-    // yet -- ignored rather than mis-rendered.
+    // aura.progress / aura.mcp_status / aura.tool_start / aura.tool_usage /
+    // aura.context_usage / aura.scratchpad_usage / approval events: not
+    // rendered yet -- ignored rather than mis-rendered.
   }
 }
 
@@ -605,9 +691,115 @@ async function sendChat(message) {
   }
 
   if (state.assistantText) history.push({ role: 'assistant', content: state.assistantText });
+
+  // Attach the reporting affordance only now that the turn is over, so the
+  // record it captures is complete.
+  msg.record.question = message;
+  msg.record.answer = state.assistantText || (stopped ? '(stopped)' : null);
+  attachReportControl(msg);
+
   chatSend.disabled = false;
   chatStop.style.display = 'none';
   currentAbortController = null;
+}
+
+// ---------- Bug reporting ----------
+const REPORT_CATEGORIES = [
+  ['wrong_answer', 'Wrong or misleading answer'],
+  ['missing_data', 'Said it found nothing, but the data exists'],
+  ['tool_error', 'A tool errored out'],
+  ['wrong_window', 'Searched the wrong time range'],
+  ['too_slow', 'Took too long or gave up partway'],
+  ['other', 'Something else'],
+];
+
+function attachReportControl(msg) {
+  const bar = document.createElement('div');
+  bar.className = 'report-bar';
+  const btn = document.createElement('button');
+  btn.className = 'small-btn';
+  btn.textContent = 'Report a problem';
+  bar.appendChild(btn);
+
+  const form = document.createElement('div');
+  form.className = 'report-form';
+
+  const sel = document.createElement('select');
+  for (const [value, label] of REPORT_CATEGORIES) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    sel.appendChild(opt);
+  }
+
+  const note = document.createElement('textarea');
+  note.rows = 2;
+  note.placeholder = 'What did you expect instead? (optional, but it is the most useful part)';
+
+  const who = document.createElement('input');
+  who.type = 'text';
+  who.placeholder = 'Your name (optional)';
+  // The IPC's browser is shared and always on, so remember the last name
+  // but keep it visible and editable -- whoever sits down next is probably
+  // not the previous person.
+  try { who.value = localStorage.getItem('reporterName') || ''; } catch (e) {}
+
+  const send = document.createElement('button');
+  send.className = 'primary';
+  send.textContent = 'Send report';
+  const cancel = document.createElement('button');
+  cancel.className = 'small-btn';
+  cancel.textContent = 'Cancel';
+  const status = document.createElement('div');
+  status.className = 'report-status';
+
+  const label = document.createElement('div');
+  label.className = 'report-hint';
+  label.textContent = 'Saves your question, Aura’s answer, and every query it ran.';
+
+  form.append(label, sel, note, who, send, cancel, status);
+  bar.appendChild(form);
+  msg.wrapper.appendChild(bar);
+
+  btn.addEventListener('click', () => {
+    form.classList.toggle('open');
+    if (form.classList.contains('open')) note.focus();
+  });
+  cancel.addEventListener('click', () => form.classList.remove('open'));
+
+  send.addEventListener('click', async () => {
+    send.disabled = true;
+    status.className = 'report-status';
+    status.textContent = 'Saving...';
+    try { localStorage.setItem('reporterName', who.value.trim()); } catch (e) {}
+    try {
+      const resp = await fetch('/api/reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: sel.value,
+          note: note.value.trim() || null,
+          reporter: who.value.trim() || null,
+          question: msg.record.question || '',
+          answer: msg.record.answer,
+          reasoning: msg.record.reasoning ? msg.record.reasoning.slice(0, 32000) : null,
+          tool_calls: msg.record.tool_calls,
+          session_id: msg.record.session_id,
+          model: msg.record.model,
+          usage: msg.record.usage,
+        }),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const saved = await resp.json();
+      form.classList.remove('open');
+      btn.textContent = 'Reported ✓ (' + saved.id + ')';
+      btn.disabled = true;
+    } catch (e) {
+      status.className = 'report-status error';
+      status.textContent = 'Could not save: ' + e.message;
+      send.disabled = false;
+    }
+  });
 }
 
 chatSend.addEventListener('click', () => {
@@ -1064,6 +1256,155 @@ document.getElementById('skill-test').addEventListener('click', () => {
 });
 
 loadSkills();
+
+// ---------- Reports ----------
+const reportsList = document.getElementById('reports-list');
+const reportsCount = document.getElementById('reports-count');
+const reportsFilter = document.getElementById('reports-filter');
+const CATEGORY_LABELS = Object.fromEntries(REPORT_CATEGORIES);
+
+function fmtWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toISOString().slice(0, 16).replace('T', ' ') + 'Z';
+}
+
+async function loadReports() {
+  reportsList.textContent = '';
+  reportsCount.textContent = 'Loading...';
+  let data;
+  try {
+    const resp = await fetch('/api/reports');
+    data = await resp.json();
+  } catch (e) {
+    reportsCount.textContent = 'Could not load reports: ' + e.message;
+    return;
+  }
+  const want = reportsFilter.value;
+  const rows = (data.reports || []).filter(r => {
+    const resolved = r.status === 'resolved';
+    return want === 'all' || (want === 'resolved' ? resolved : !resolved);
+  });
+  reportsCount.textContent = rows.length + ' shown of ' + (data.total || 0) + ' total';
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = want === 'open'
+      ? 'No open reports. Nothing to triage.'
+      : 'No reports yet.';
+    reportsList.appendChild(empty);
+    return;
+  }
+  for (const r of rows) reportsList.appendChild(renderReport(r));
+}
+
+function renderReport(r) {
+  const row = document.createElement('div');
+  row.className = 'report-row' + (r.status === 'resolved' ? ' resolved' : '');
+
+  const meta = document.createElement('div');
+  meta.className = 'report-meta';
+  const failed = (r.tool_calls || []).filter(c => c.success === false).length;
+  meta.textContent = [
+    fmtWhen(r.created_at),
+    r.id,
+    r.reporter || 'anonymous',
+    CATEGORY_LABELS[r.category] || r.category,
+    (r.tool_calls || []).length + ' tool calls' + (failed ? ' (' + failed + ' failed)' : ''),
+    r.usage && r.usage.prompt_tokens ? r.usage.prompt_tokens.toLocaleString() + ' in' : null,
+    r.status === 'resolved' ? 'RESOLVED' : null,
+  ].filter(Boolean).join('  ·  ');
+  row.appendChild(meta);
+
+  const q = document.createElement('div');
+  q.className = 'report-q';
+  q.textContent = r.question || '(no question recorded)';
+  row.appendChild(q);
+
+  if (r.note) {
+    const note = document.createElement('div');
+    note.className = 'report-note';
+    note.textContent = '“' + r.note + '”';
+    row.appendChild(note);
+  }
+
+  const detail = document.createElement('div');
+  detail.className = 'report-detail';
+
+  // The queries are the point of the whole feature, so they render first
+  // and in full -- an answer can look reasonable while the query behind it
+  // was scoped to the wrong window.
+  if ((r.tool_calls || []).length) {
+    const h = document.createElement('div');
+    h.className = 'report-meta';
+    h.textContent = 'Queries Aura actually sent';
+    detail.appendChild(h);
+    for (const c of r.tool_calls) {
+      const call = document.createElement('div');
+      call.className = 'report-call' + (c.success === false ? ' failed' : '');
+      const args = c.arguments && Object.keys(c.arguments).length
+        ? JSON.stringify(c.arguments, null, 1)
+        : '(no arguments)';
+      call.textContent = c.tool_name +
+        (c.duration_ms != null ? '  [' + c.duration_ms + 'ms]' : '') +
+        (c.success === false ? '  FAILED' : '') + '\n' + args +
+        (c.error ? '\nerror: ' + c.error : '') +
+        (c.result_chars != null ? '\n→ ' + c.result_chars.toLocaleString() + ' chars returned' : '');
+      detail.appendChild(call);
+    }
+  }
+
+  if (r.answer) {
+    const h = document.createElement('div');
+    h.className = 'report-meta';
+    h.style.marginTop = '10px';
+    h.textContent = 'Answer given';
+    const a = document.createElement('div');
+    a.className = 'report-q';
+    a.textContent = r.answer;
+    detail.append(h, a);
+  }
+
+  const actions = document.createElement('div');
+  actions.style.marginTop = '10px';
+  const toggle = document.createElement('button');
+  toggle.className = 'small-btn';
+  toggle.textContent = 'Show queries';
+  toggle.addEventListener('click', () => {
+    detail.classList.toggle('open');
+    toggle.textContent = detail.classList.contains('open') ? 'Hide queries' : 'Show queries';
+  });
+  actions.appendChild(toggle);
+
+  const resolve = document.createElement('button');
+  resolve.className = 'small-btn';
+  resolve.textContent = r.status === 'resolved' ? 'Reopen' : 'Mark resolved';
+  resolve.addEventListener('click', async () => {
+    resolve.disabled = true;
+    let by = '';
+    try { by = localStorage.getItem('reporterName') || ''; } catch (e) {}
+    try {
+      await fetch('/api/reports/' + encodeURIComponent(r.id) + '/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: r.status === 'resolved' ? 'open' : 'resolved',
+          by: by || null,
+        }),
+      });
+      loadReports();
+    } catch (e) {
+      resolve.disabled = false;
+    }
+  });
+  actions.appendChild(resolve);
+
+  row.append(actions, detail);
+  return row;
+}
+
+document.getElementById('reports-refresh').addEventListener('click', loadReports);
+reportsFilter.addEventListener('change', loadReports);
 </script>
 </body>
 </html>

@@ -13,6 +13,7 @@ A playground to test out the features of [Aura by Mezmo](https://github.com/mezm
 - **`services/freshdesk-mcp/`** — MCP server wrapping the Freshdesk API v2 (`search_tickets`, `get_ticket`, `list_recent_tickets`). `get_ticket` also returns `rca_hints`: the robot and the *failure* window resolved server-side, which is not the same as when the ticket was filed.
 - **`services/fleet-status-mcp/`** — MCP server answering "is `gen1-prod17` actually on right now?" by reading the Robot Operations Center dashboard's HTTP API over Tailscale. Optional: without it the agent can still read logs, it just can't distinguish "no logs because nothing went wrong" from "no logs because the robot was off".
 - **`docker-compose.yml`** — wires all of the above together plus the `mezmo/aura:latest` agent image.
+- **`scripts/replay_report.py`** — re-sends a bug report's recorded queries against the live stack, so you can tell a bad query apart from a filtered-out answer. See ["Bug reports"](#bug-reports-when-someone-gets-a-wrong-answer) below.
 - **`config/skills/`** — Agent Skills (agentskills.io spec, same format Claude uses): folders of `SKILL.md` files with static domain knowledge the agent loads on demand via `load_skill`/`read_skill_file`, rather than always sitting in the system prompt. Ships with two: `log-app-reference` (which app/source/level to query for a given question) and `robot-shift-notes` (log-keyword reference + output format for plain-English shift notes).
 
 ## Quickstart
@@ -69,6 +70,49 @@ The window and the robot are resolved server-side instead, by `freshdesk-mcp`'s 
 The prompt then asks the agent to work **top-down by severity** within that window — FATAL, then CRITICAL, then ERROR, then WARN — and explicitly *not* to keyword-search the operator's own wording, which is a symptom in their words rather than log text. The ticket description is used at the end, to judge whether the candidate events actually explain the report, not at the start to pick search terms.
 
 **Skills, authored from the browser.** The "Skills" tab is a UI-only front end for `config/skills/` — meant for sharing this playground with people who get the chatbot but not code access. It lists every skill (the two that ship with the repo are marked "built-in"), and "+ New skill" opens a form for a name, a description (what it does + when Aura should reach for it — this sits in Aura's system prompt at all times, so it's worth being specific), and Markdown instructions (a starter template is prefilled). Click any card to edit or delete it. Because Aura only discovers skills at startup (see "Skills" below), saving shows a banner reminding whoever is hosting this deployment to run `docker compose restart aura` before the change is live in chat — this app can create/edit the files, but it deliberately can't restart Aura itself, since a shared multi-person deployment shouldn't let any one visitor interrupt everyone else's conversation to test a skill.
+
+## Bug reports: when someone gets a wrong answer
+
+Every assistant message in chat has a small **"Report a problem"** button.
+It opens a short form — category, an optional note about what they expected,
+an optional name — and saves the whole turn. Reports appear in the
+**Reports** tab for anyone to read and mark resolved.
+
+**What gets saved is the point.** A report does not just store the question
+someone typed; it stores **every tool call Aura made, with its exact
+arguments** — the query string, `from_time`, `to_time`, whether it failed and
+why — plus the answer, the reasoning, the model, the session id and the token
+usage. That is deliberate: almost every wrong answer this stack has produced
+was a wrong *time window* or an over-broad field match, and neither is
+visible in the final answer. Without the arguments a report tells you that
+something was wrong; with them it usually tells you what.
+
+Storage is `reports/reports.jsonl` on the host — a bind mount, not a Docker
+volume, so you can `grep` it directly on the machine that runs this. It is
+**append-only**: marking a report resolved writes a status line rather than
+rewriting history, so both the original report and the fact that someone
+triaged it survive. A half-written line (killed mid-append) is skipped rather
+than breaking the tab.
+
+To investigate one:
+
+```bash
+REPORT_ID=abc123def456 docker compose exec mezmo-proxy python - < scripts/replay_report.py
+```
+
+That re-sends each recorded query through `mezmo-proxy` and prints what comes
+back now beside what came back then, which separates the three things a
+"wrong answer" can be: the query was wrong, the filters hid the data, or the
+tools were fine and Aura misread them. Omit `REPORT_ID` to replay the newest.
+
+`reports/` is **gitignored** — a report stores real tool results, which means
+real production log lines. Same rule as `experiments/*/out/`.
+
+Two limits worth knowing: there is no login, so the reporter name is
+self-declared and unverified — it tells you who to go ask, not who to hold
+responsible. And tool results are clipped to 4,000 characters each, with the
+original length recorded, so a report never silently fails to save because
+one log payload was enormous.
 
 ## Why it's built this way
 
@@ -127,10 +171,11 @@ To add another skill, either use the "Skills" tab in the UI (no code access need
 
 ## Sharing this with other people
 
-If you're handing this playground to people who should only get the chatbot/UI — not the repo, not edit access to `config/aura.toml` or the Docker setup — give them the URL for the `web` service (host port 8000) and nothing else. The "Upload Logs", "Live Logs", "Freshdesk Bugs", and "Skills" tabs are all just friendlier front ends for things Aura can already do or files it already reads; none of them expose the underlying code or let a visitor touch anything outside `config/skills/`. Three things worth knowing before you do this:
+If you're handing this playground to people who should only get the chatbot/UI — not the repo, not edit access to `config/aura.toml` or the Docker setup — give them the URL for the `web` service (host port 8000) and nothing else. The "Upload Logs", "Live Logs", "Freshdesk Bugs", "Reports", and "Skills" tabs are all just friendlier front ends for things Aura can already do or files it already reads; none of them expose the underlying code or let a visitor touch anything outside `config/skills/` and `reports/`. Four things worth knowing before you do this:
 
 - **No login.** Nothing in this repo gates who can reach the `web` service — anyone with the URL can chat, upload logs, and create/edit/delete skills. That's fine for a small trusted group; put it behind whatever auth (a reverse proxy, a VPN, Tailscale, etc.) makes sense if the audience is bigger than that.
 - **Anyone who can reach the chat can read production logs.** The proxy constrains *which* logs (production robots, filtered) but not *who* asks. Treat the URL as carrying the same sensitivity as Mezmo access itself, and don't publish the `mezmo-proxy` port (8093) — it takes no authentication of its own, since it was only ever meant to be reachable from `aura` on the compose network.
+- **Feedback comes back through the Reports tab.** Tell people to hit "Report a problem" on any answer that looks wrong rather than describing it to you in chat — the report captures the queries behind the answer, which a verbal description cannot. See ["Bug reports"](#bug-reports-when-someone-gets-a-wrong-answer).
 - **Skill changes need a restart.** New or edited skills only take effect after the `aura` container restarts (see above) — a deliberate choice so that no visitor can restart Aura themselves and interrupt everyone else's in-flight conversation. As the operator, restart it yourself (`docker compose restart aura`) after skill edits land, or on whatever cadence makes sense for your group.
 
 ## Extending

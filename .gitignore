@@ -19,3 +19,8 @@ experiments/mcp-tool-behavior/TOOL_REPORT.md
 # Local reference material (vendor PDFs, cheat sheets) -- not part of the
 # deployable stack and not reviewed for customer data.
 Resources/
+
+# Bug reports from the UI. Same rule as above, and stricter: a report
+# stores the tool results from the turn it describes, which are real
+# production log lines.
+reports/

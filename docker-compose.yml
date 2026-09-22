@@ -114,6 +114,11 @@ services:
       # error | warn | off — what to do if a response carries a structural
       # `host` field outside the production scope. See server.py.
       TRIPWIRE_MODE: "error"
+    volumes:
+      # Read-only, and only so `scripts/replay_report.py` can re-send a bug
+      # report's recorded queries from in here, where fastmcp and the proxy
+      # are both reachable. The proxy itself never reads this.
+      - ./reports:/reports:ro
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -200,6 +205,7 @@ services:
       AURA_BASE_URL: "http://aura:8080"
       UPLOAD_DIR: "/data/uploads"
       SKILLS_DIR: "/app/skills"
+      REPORTS_DIR: "/data/reports"
 
       # Blanked for the same reason as on `aura`: env_file pulls in the
       # whole .env, and this container has no use for the Mezmo credential.
@@ -212,6 +218,12 @@ services:
       # delete SKILL.md files. Aura only re-scans this directory at
       # startup, so changes need `docker compose restart aura` to go live.
       - ./config/skills:/app/skills
+      # Bug reports from the "Report a problem" button. A bind mount, not a
+      # named volume, so reports.jsonl is directly readable and greppable on
+      # the host running this -- the point is to analyse them later without
+      # having to shell into a container. Gitignored: reports quote real
+      # production log lines.
+      - ./reports:/data/reports
     depends_on:
       aura:
         condition: service_healthy
