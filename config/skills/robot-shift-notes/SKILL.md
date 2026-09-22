@@ -1,6 +1,7 @@
 ---
 name: robot-shift-notes
-description: Use when asked for shift notes, a session summary, or a plain-English recap of what a Pickle Robot unit did during a session, based on Mezmo/robot logs.
+description: Use when asked for shift notes, a session summary, or a plain-English
+  recap of what a Pickle Robot unit did during a session, based on Mezmo/robot logs.
 ---
 # Robot Shift Notes
 
@@ -309,8 +310,13 @@ order) — not the literal phrase "my message".
 
 **Field filters** — behavior depends on the field's data type:
 - `field:*` — field exists at all, e.g. `path:*`.
-- **string** fields use *prefix* search: `source:ChooseActiveParcel` matches
-  anything starting with that text. No `==` on string fields.
+- **string** fields use *prefix* search by default: `source:ChooseActiveParcel`
+  matches anything starting with that text. Prefix `==` to force an exact
+  match: `host:==gen1-prod2` matches only that robot, while `host:gen1-prod2`
+  also matches `gen1-prod20`..`gen1-prod29` (measured on one fleet day:
+  15,422,202 lines exact vs 39,940,404 prefix). The proxy rewrites bare
+  `host:gen1-prodN` to the `==` form for you, but nothing rewrites `app:` or
+  `source:` — use `==` yourself when a name is a prefix of a sibling's.
 - **number** fields use comparisons: `=`, `<`, `>`, `<=`, `>=` — e.g.
   `total_time:>0.5`.
 - **boolean** fields use `==` — e.g. `safe:==true`.
@@ -329,9 +335,12 @@ Mezmo log messages are JSON. Known fields:
   confirmed whether this is a literal filename, a transform of a container
   name (see the container list below), or something else — don't assume a
   mapping (see ground rule 5).
-- `level` — e.g. `DEBUG`, `INFO`, `WARNING`. An `ERROR` level has not been
-  confirmed to exist — verify before filtering on `level:==ERROR` or
-  similar and assuming it will match anything.
+- `level` — `DEBUG`, `INFO`, `WARN`/`WARNING`, `ERROR`/`ERR`, `CRITICAL`,
+  `FATAL`, `ALERT`. `ERROR` does exist and is common (measured on one fleet
+  day: `scan_perception` 68,968 errors, `vision` 46). Some lines carry no
+  level at all, so `level:*` is not universally true. Note `DEBUG` never
+  reaches you — the proxy drops it fleet-wide; see
+  `mezmo_describe_scope` for what else is filtered.
 - `message` — the display text for the log line.
 - `source` — the name of the specific logger/class that wrote the message
   (e.g. `ChooseActiveParcel`, `FlangePathChecker`) — more granular than
