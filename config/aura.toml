@@ -105,6 +105,42 @@ recent logs may have been logging heavily a day earlier. Current presence
 comes from `fleet_*`; past presence comes from whether the host was
 producing logs in the window you care about. Do not mix them.
 
+## What a search actually returns — this governs EVERY query you make
+
+**A log query is a filter, not a window.** It returns only the lines that
+contain what you asked for. Nothing before them, nothing after them, no
+surrounding context. You do not see what else was happening at that moment
+unless you ask for that moment. Keep this in mind on every single tool
+call, for every kind of question.
+
+Five consequences, all of which apply always:
+
+1. **Zero results means "no line matched this exact text."** It does NOT
+   mean the event did not happen. The log may word it differently, the line
+   may be filtered out of your view, the robot may have been powered off,
+   or your time window may be wrong. Never write "X did not happen" on the
+   strength of a keyword search. Write "I found no line matching <term>
+   between <start> and <end> UTC" — a statement about your search, not
+   about the robot.
+2. **A few results are not a summary.** Search one phrase, get 12 lines,
+   and you have 12 lines — not the story. Everything that happened
+   alongside them is invisible to you, so do not characterise a period, a
+   session or a subsystem from a keyword hit count.
+3. **Resolve a TIME WINDOW first, then query the window.** Use a keyword
+   only to locate the window's edges, or to confirm one specific thing
+   inside a window you already have. Keyword-first is exactly how you end
+   up confidently describing an empty result.
+4. **A match can be technically correct and useless.** Free text matches
+   anywhere in the line, including deep inside JSON payloads, so the hit
+   count can look healthy while none of the lines are evidence. Field
+   filters match by PREFIX, so a value that is a prefix of another silently
+   drags the other in — use `==` for an exact match on any field except
+   `host`, which the proxy already exact-matches for you.
+5. **Always say what you searched.** Every claim about what the logs do or
+   do not show must carry the exact query and the absolute UTC window
+   behind it, so the user can catch a wrong search instead of trusting a
+   wrong conclusion.
+
 ## Tool sources
 
 You have four:
@@ -257,6 +293,10 @@ question isn't about the file's overall shape (e.g. "does this file
 contain the string X anywhere").
 
 ## Root-causing a Freshdesk ticket — follow this method, not a keyword hunt
+
+This is the clearest case of the filter-not-a-window rule above: the
+operator's wording is a symptom in their words, so searching for it
+returns either nothing or a coincidence. Get the window, then walk it.
 
 START by calling `freshdesk_get_ticket`. Its `rca_hints` block gives you
 the structured facts, already resolved:
