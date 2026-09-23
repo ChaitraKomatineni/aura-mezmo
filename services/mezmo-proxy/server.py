@@ -129,40 +129,37 @@ APP_LEVEL_EXCLUSIONS = {
 # investigating it will be invisible here and has to be queried outside
 # this proxy -- config/aura.toml tells the agent to say so rather than
 # report that there were none.
+FULLY_EXCLUDED_APPS = ("pickle_rosbridge",)
+
+# `dill-user` was briefly added to the tuple above and then deliberately
+# taken back out. Recorded here so nobody re-adds it on the same reasoning.
 #
-# dill-user is excluded for a completely different reason: not volume, but
-# because it is a FALSE LEAD that reliably produces confident wrong answers.
+# What it is: 100% operator bug reports, nothing else. Measured over 30
+# days -- 1,207 lines, 598 at FATAL and 609 rendering the same payload with
+# no level, every one of them `(User Submitted Bug Report) site: ...,
+# operator: ..., description: ...`. No robot behaviour in the app at all.
 #
-# Measured over 30 days: 1,207 lines total, 598 at FATAL and 609 rendering
-# the same payload unleveled. Every single one is an operator pressing the
-# bug-report button -- `(User Submitted Bug Report) site: ..., operator:
-# ..., description: ...`. There is no operational content in the app at all.
+# Why excluding it was tempting: it arrives at FATAL, so a top-down
+# severity walk finds it FIRST and it looks like the most severe event in
+# the window. On ticket #8055 it was the only production FATAL for
+# gen1-prod39 in the whole window, and it got reported as the top critical
+# event -- a confident wrong answer built on the operator's own report of
+# the problem.
 #
-# The danger is its position. It arrives as FATAL, and the Freshdesk RCA
-# method starts by walking severity top-down from FATAL, so the first thing
-# the agent finds in the window is the report ITSELF -- which postdates the
-# fault, describes it in the operator's words, and looks like the most
-# severe event present. Aura duly reported it as the top critical event on
-# ticket #8055.
+# Why it stays anyway: "show me all the bug reports from yesterday" is a
+# legitimate question on its own, with no Freshdesk ticket involved. A
+# hard filter makes that unanswerable, and silently so. Keeping it also
+# keeps `most_recent_bag` reachable (e.g.
+# 2026-09-23T13:34:22-04:00_recover_failed_mode.bag) -- the robot's own
+# label for the state it was in, which appears NOWHERE in the Freshdesk
+# ticket; a .bag search across a whole ticket returns nothing.
 #
-# It is also redundant. Checked field by field against ticket #8055: the
-# ticket's rca_hints already carries reported_at_utc (2026-09-23T17:35:02Z,
-# identical to the log line's timestamp), the robot, the subsystem, the
-# resolved window and cf_release_version. Freshdesk is the system of record
-# for operator reports; this app is a copy of it that happens to look like a
-# fatal log event.
-#
-# KNOWN LOSS, accepted: the log line carries `most_recent_bag` (e.g.
-# 2026-09-23T13:34:22-04:00_recover_failed_mode.bag) and `operator`, and
-# NEITHER appears anywhere in the Freshdesk ticket -- a .bag filename search
-# across the whole ticket returns nothing. The bag name is the robot's own
-# label for the state it was in, which is a genuine lead. It is given up
-# because it is a lead rather than a window, its usefulness is unmeasured
-# (n=1), and the ticket already supplies an equally precise report time. If
-# the bag name ever proves to matter, the right fix is to enrich
-# freshdesk-mcp's rca_hints with it, not to un-filter an app that reads as
-# the fault.
-FULLY_EXCLUDED_APPS = ("pickle_rosbridge", "dill-user")
+# So the false-lead risk is handled where the misreading happens rather
+# than by deletion: config/aura.toml states, as a top-level rule applying
+# to every question and not just ticket RCA, that a bug report is the
+# operator pressing a button AFTER the fault, is never a root cause or the
+# start of an event, and is useful as an upper-bound anchor to search
+# backwards from. See "A report of a fault is not the fault" there.
 
 
 # Apps that are operationally irrelevant to robot/arm/safety triage and are

@@ -281,27 +281,36 @@ commands, spec submissions. **Not a primary data source**; it relays what other 
 computed. Note it shows specs being *submitted*, not which are currently *active* — for
 that use `vision`'s `active list of package_specs`.
 
-### `dill-user` — EXCLUDED. It was the operator's bug report, not the fault.
-**You will never see this app.** It is filtered out entirely, and that is deliberate.
+### `dill-user` — operator bug reports ONLY. Never a root cause.
+**`[VERIFIED 1,207 lines / 30 days]`** — 598 at FATAL, 609 the same payload unleveled.
 
-Every line in it was an operator pressing the bug-report button — `(User Submitted
-Bug Report) site: ..., operator: ..., description: "wont retract arm"`. Measured over
-30 days: 1,207 lines, and **not one** of them was robot behaviour.
+Every line is a human pressing the bug-report button in the UI:
 
-It was removed because of *where* it landed rather than its volume. It arrives at
-**FATAL**, so a top-down severity walk hits it first, and it looks like the most
-severe event in the window. But it is written *after* the fault, by a human, in the
-human's words. On ticket #8055 it was the only production FATAL in the whole window,
-and reporting it as the critical event produced a confident wrong answer.
+```
+(User Submitted Bug Report) site: <site>, dill_version: <ver>, robot: <host>,
+operator: <name>, description: <what they typed>
+```
 
-**Never conclude anything from the presence or absence of a bug-report line.** If you
-want to know what the operator reported, read the Freshdesk ticket — that is the
-system of record, and `freshdesk_get_ticket`'s `rca_hints` already gives you
-`reported_at_utc`, the robot, the subsystem and the window.
+**There is no robot behaviour in this app.** It is visible to you on purpose — "show
+me the bug reports for this robot yesterday" is a real question and this is where the
+answer lives — but it is never evidence of a cause.
 
-The general rule this is an instance of: **a report of a fault is not the fault.**
-Whatever timestamp a human-filed report carries, the cause precedes it. Search
-*before* it.
+**The trap:** it is logged at FATAL, so a top-down severity walk finds it first and it
+reads like a fault ("wont retract arm"). On ticket #8055 it was the only production
+FATAL in the window, and calling it the critical event produced a confident wrong
+answer. Note it as the report, then keep descending.
+
+**Use it as an anchor, not an answer:**
+
+| field | what it gives you |
+|---|---|
+| its timestamp | an **upper bound** — the fault is earlier. Search backwards. |
+| `most_recent_bag` | `2026-09-23T13:34:22-04:00_recover_failed_mode.bag` — the robot's own recording. The filename holds a tighter timestamp **and** a mode name. Not present in the Freshdesk ticket. |
+| `operator` | who to ask |
+| `description` | the operator's wording — for checking a candidate at the end, never for searching |
+
+See "A report of a fault is not the fault" in the system prompt; it applies to every
+question, not just ticket RCA.
 
 ### Lower volume, less characterised
 `navigation` `[VERIFIED 26,089/day]` · `camera` `[VERIFIED 18,888/day, ERROR 444]` ·
@@ -367,9 +376,9 @@ because the work of a session is not labelled.
 2. `taskloop` — `ESTOP detected with reason`, the documented entry point
 3. `motor_controller` — STO / abort codes, hardware confirmation
 4. `fastloop` — its surviving WARN/ERROR; controller cleanup failures
-5. For whether an operator reported it: the Freshdesk ticket, not the logs.
-   `dill-user` is filtered out (see above) precisely because its FATAL bug-report
-   line reads as the fault when it is only the report of one.
+5. `dill-user` — whether an operator reported it, and `most_recent_bag` for the
+   robot's own label for the state it was in. Read it for the anchor, never as
+   the cause (see above).
 
 Remember `GRIPPER_BREAKAWAY` is the most common reason by two orders of magnitude, so
 finding one is not itself remarkable.

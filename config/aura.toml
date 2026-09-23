@@ -105,6 +105,53 @@ recent logs may have been logging heavily a day earlier. Current presence
 comes from `fleet_*`; past presence comes from whether the host was
 producing logs in the window you care about. Do not mix them.
 
+## A report of a fault is not the fault — applies to EVERY question
+
+The `dill-user` app is **nothing but operator bug reports**. Every line in
+it is a human at the robot pressing the bug-report button in the UI. There
+is no robot behaviour in that app at all — 1,207 lines over 30 days, all of
+them a person filing a complaint.
+
+It is logged at **FATAL**, which is the trap. FATAL is the top of every
+severity walk, so it is often the first and most severe thing you find, and
+it is phrased like a fault ("wont retract arm"). It is not a fault. It is
+the report of one, written *after* the fact, by a person, in that person's
+own words.
+
+So, for any question, any workflow, any ticket:
+
+- **Never call a `dill-user` line a root cause.** It cannot be one. A human
+  typed it.
+- **Never present its timestamp as when the incident happened**, and never
+  say "the failure occurred at <that time>". That timestamp is only when
+  somebody pressed a button.
+- **Never let it end your search.** Finding it tells you a person was
+  unhappy, which you already knew.
+- **Never treat its `description` as log text.** It is the operator's
+  wording and will not appear anywhere else in the logs.
+
+What it IS good for, and you should use it this way:
+
+- **An upper bound.** The fault happened BEFORE that timestamp. Search
+  backwards from it, not around it.
+- **`most_recent_bag`** — e.g.
+  `2026-09-23T13:34:22.801588-04:00_recover_failed_mode.bag`. This is the
+  robot's own recording of what it was doing, and the filename carries both
+  a timestamp and a mode name. Read it: the timestamp is a much tighter
+  anchor than the report time, and a name like `recover_failed_mode` tells
+  you what state the robot had already fallen into. This field exists only
+  in the log line — it is not in the Freshdesk ticket.
+- **`operator`** — who to ask.
+- **Answering questions about the reports themselves.** If someone asks to
+  see the bug reports for a robot, a site or a day, this app is exactly the
+  right place to look, and then the lines are the answer rather than a
+  false lead.
+
+The same caution generalises. Anything that represents a human filing,
+raising or submitting something — a ticket, a report, a button press — marks
+the LATEST the underlying problem can have happened, never the moment it
+did.
+
 ## What a search actually returns — this governs EVERY query you make
 
 **A log query is a filter, not a window.** It returns only the lines that
@@ -337,16 +384,9 @@ FATAL, 0 CRITICAL, 103 ERROR and 8,792 WARN lines, against 1.1M lines
 total. Reading 103 errors is entirely feasible; searching 1.1M lines for
 a word the operator invented is not.
 
-A REPORT OF A FAULT IS NOT THE FAULT. The operator's bug-report line was
-itself logged at FATAL, which put it at the very top of this ladder and
-made it the first thing a severity walk found — and it is written after
-the event, by a human, in the human's words. That app (`dill-user`) is
-now filtered out entirely so it cannot mislead you. The principle
-outlasts the filter: anything that looks like a human filing a report,
-a ticket being raised, or a button being pressed is a timestamp marking
-the LATEST the fault can have happened. The cause is earlier. Never
-present such a line as the critical event, and never let it end the
-search.
+Expect the operator's own bug report to be sitting at the top of this
+ladder at FATAL. It is not a finding — see "A report of a fault is not
+the fault" above. Note it as the report, then keep descending.
 
 At this scale the heavyweight tools work, and they will not work if you
 point them at the whole fleet. Once you are scoped to one host, a
