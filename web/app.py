@@ -410,7 +410,11 @@ class ReportCreate(BaseModel):
     # the skill `author` field above.
     reporter: str | None = Field(None, max_length=128)
     question: str
+    # `answer` is the full visible text, narration included, because that is
+    # what an RCA wants. `final_answer` is just the run after the last tool
+    # call -- what the user actually read.
     answer: str | None = None
+    final_answer: str | None = None
     reasoning: str | None = None
     tool_calls: list[ReportedToolCall] = []
     session_id: str | None = Field(None, max_length=128)
@@ -423,6 +427,7 @@ class ReportCreate(BaseModel):
 CLIP_LIMITS = {
     "question": 16000,
     "answer": 64000,
+    "final_answer": 32000,
     "reasoning": 32000,
     "note": 4000,
     "error": 2048,

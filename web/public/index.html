@@ -226,6 +226,40 @@
   }
   .restart-banner.show { display: block; }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; }
+  /* Narration stays readable but recedes; the answer is the thing you can
+     find at a glance when scrolling back through a long turn. */
+  .answer-run { white-space: pre-wrap; }
+  .answer-run.narration { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .answer-run.final {
+    white-space: normal;
+    border-left: 3px solid var(--brand-green);
+    background: var(--panel);
+    padding: 12px 14px;
+    margin-top: 12px;
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .answer-label {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.09em;
+    color: var(--brand-green); margin-bottom: 10px;
+  }
+  .answer-run.final .ans-h { font-weight: 600; margin: 14px 0 6px; }
+  .answer-run.final .ans-h:first-of-type { margin-top: 0; }
+  .answer-run.final .ans-h1 { font-size: 17px; }
+  .answer-run.final .ans-h2 { font-size: 16px; }
+  .answer-run.final .ans-h3 { font-size: 15px; color: var(--muted); }
+  .answer-run.final .ans-p { margin-bottom: 6px; }
+  .answer-run.final .ans-li { margin: 0 0 4px 16px; }
+  .answer-run.final .ans-num { color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
+  .answer-run.final .ans-sp { height: 8px; }
+  .answer-run.final strong { font-weight: 600; }
+  .answer-run.final code {
+    font-family: var(--font-mono); font-size: 12px; background: var(--bg);
+    padding: 1px 4px; border-radius: 3px;
+  }
+  .answer-notice { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .answer-notice.error { color: var(--danger); }
   .report-bar { margin-top: 6px; }
   .report-bar > .small-btn { font-size: 11px; padding: 2px 8px; opacity: 0.7; }
   .report-bar > .small-btn:hover { opacity: 1; }
@@ -495,12 +529,66 @@ function addMessage(role, text) {
   return div;
 }
 
-// An assistant message is two parts, not one blob of text:
-//   - a collapsed-by-default "Show reasoning" disclosure, fed by
-//     aura.reasoning / aura.tool_requested / aura.tool_complete events
-//     (only shown at all once there's at least one step to show)
-//   - the final synthesized answer, always visible, never mixed with the
-//     step content above it
+// Escape first, then apply a small markdown subset. Order matters: log
+// content routinely contains < and & and must never reach innerHTML raw.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function renderInline(s) {
+  return s
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+}
+
+// Deliberately tiny: headings, bold, inline code, bullets, numbered items.
+// Aura's answers use exactly these, and a real markdown library would be a
+// dependency plus an XSS surface for something this small.
+function renderAnswer(text) {
+  const out = [];
+  for (const raw of escapeHtml(text).split('\n')) {
+    const heading = raw.match(/^\s*(#{1,4})\s+(.*)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 3);
+      out.push('<div class="ans-h ans-h' + level + '">' +
+        renderInline(heading[2]) + '</div>');
+      continue;
+    }
+    const bullet = raw.match(/^\s*[-*]\s+(.*)$/);
+    if (bullet) {
+      out.push('<div class="ans-li">' + renderInline(bullet[1]) + '</div>');
+      continue;
+    }
+    const numbered = raw.match(/^\s*(\d+)\.\s+(.*)$/);
+    if (numbered) {
+      out.push('<div class="ans-li"><span class="ans-num">' + numbered[1] +
+        '.</span> ' + renderInline(numbered[2]) + '</div>');
+      continue;
+    }
+    if (!raw.trim()) { out.push('<div class="ans-sp"></div>'); continue; }
+    out.push('<div class="ans-p">' + renderInline(raw) + '</div>');
+  }
+  return out.join('');
+}
+
+// An assistant message is NOT one blob of text. Aura emits text, calls a
+// tool, emits more text, calls another tool, and only the run of text after
+// the LAST tool call is the answer -- everything before it is the model
+// narrating its next step ("Let me search for..."). Concatenating them is
+// what buried the answer: you get "...motion failures:Perfect! Now I have
+// found the key evidence" as one paragraph.
+//
+// A tool call therefore closes the current text run. At the end of the turn
+// the last non-empty run is promoted to the answer: accent border, markdown
+// rendered, labelled. Earlier runs stay visible but muted, because seeing
+// how it got there is still useful.
+//
+// Note: aura.reasoning fires zero times in practice on this deployment even
+// with AURA_EMIT_REASONING=true -- the narration IS the model's visible
+// output, not hidden chain-of-thought. The "Show reasoning" disclosure only
+// ever carries tool step lines.
 function addAssistantMessage() {
   const wrapper = document.createElement('div');
   wrapper.className = 'msg assistant';
@@ -541,6 +629,10 @@ function addAssistantMessage() {
   };
 
   let stepCount = 0;
+  // One entry per run of text between tool calls.
+  const runs = [];
+  let current = null;
+
   return {
     wrapper, content, record,
     addStep(label, cls) {
@@ -555,6 +647,52 @@ function addAssistantMessage() {
       stepsBody.appendChild(line);
       return line;
     },
+
+    // Plain text while streaming -- markdown is only rendered once the run
+    // is known to be complete, so a half-arrived `**` never flickers as
+    // literal asterisks and then reflows.
+    appendText(delta) {
+      if (!current) {
+        if (!runs.length) content.textContent = '';
+        const el = document.createElement('div');
+        el.className = 'answer-run narration';
+        content.appendChild(el);
+        current = { el, text: '' };
+        runs.push(current);
+      }
+      current.text += delta;
+      current.el.textContent = current.text;
+    },
+
+    // A tool call means the text so far was Aura saying what it was about
+    // to do. Close the run; the next delta starts a new one.
+    closeRun() { current = null; },
+
+    // Promote the last run that actually has text. Anything before it was
+    // narration and keeps the muted style.
+    finalize() {
+      const answer = [...runs].reverse().find(r => r.text.trim());
+      if (!answer) return null;
+      answer.el.className = 'answer-run final';
+      answer.el.innerHTML = renderAnswer(answer.text.trim());
+      const label = document.createElement('div');
+      label.className = 'answer-label';
+      label.textContent = 'Answer';
+      answer.el.prepend(label);
+      return answer.text.trim();
+    },
+
+    // Errors and the [stopped] tag get their own node rather than
+    // overwriting content, which would wipe every run above.
+    addNotice(text, cls) {
+      const el = document.createElement('div');
+      el.className = cls || 'answer-notice';
+      el.textContent = text;
+      content.appendChild(el);
+      return el;
+    },
+
+    hasText() { return runs.some(r => r.text.trim()); },
   };
 }
 
@@ -583,11 +721,12 @@ function handleSseLines(lines, msg, state) {
     try { json = JSON.parse(data); } catch (e) { continue; }
 
     if (!eventType) {
-      // Plain OpenAI-compatible chunk -- the actual final-answer text.
+      // Plain OpenAI-compatible chunk. This is Aura's visible text, which
+      // includes its between-tool narration -- not just the answer.
       const delta = json.choices?.[0]?.delta?.content;
       if (delta) {
         state.assistantText += delta;
-        msg.content.textContent = state.assistantText;
+        msg.appendText(delta);
         chatLog.scrollTop = chatLog.scrollHeight;
       }
       continue;
@@ -595,6 +734,7 @@ function handleSseLines(lines, msg, state) {
 
     if (eventType === 'aura.tool_requested') {
       msg.addStep('Calling ' + json.tool_name + '...', 'tool');
+      msg.closeRun();
       msg.record.tool_calls.push({
         tool_id: json.tool_id,
         tool_name: json.tool_name,
@@ -678,15 +818,19 @@ async function sendChat(message) {
     if (e.name === 'AbortError') {
       stopped = true;
     } else {
-      msg.content.textContent = (state.assistantText || '') + '\n\nError talking to Aura: ' + e;
+      msg.addNotice('Error talking to Aura: ' + e, 'answer-notice error');
     }
   }
 
+  // Promote the last text run to the answer before anything else is
+  // appended, so the accent block is the last substantial thing on screen.
+  const finalAnswer = msg.finalize();
+
   if (stopped) {
+    if (!msg.hasText()) msg.addNotice('(stopped before any answer arrived)');
     const tag = document.createElement('span');
     tag.className = 'stopped-tag';
     tag.textContent = '[stopped]';
-    if (!state.assistantText) msg.content.textContent = '(stopped before any answer arrived)';
     msg.content.appendChild(tag);
   }
 
@@ -695,7 +839,10 @@ async function sendChat(message) {
   // Attach the reporting affordance only now that the turn is over, so the
   // record it captures is complete.
   msg.record.question = message;
+  // Full text for RCA; the isolated answer as well, so the Reports tab can
+  // show what the user actually read instead of the whole narration.
   msg.record.answer = state.assistantText || (stopped ? '(stopped)' : null);
+  msg.record.final_answer = finalAnswer;
   attachReportControl(msg);
 
   chatSend.disabled = false;
@@ -782,6 +929,7 @@ function attachReportControl(msg) {
           reporter: who.value.trim() || null,
           question: msg.record.question || '',
           answer: msg.record.answer,
+          final_answer: msg.record.final_answer,
           reasoning: msg.record.reasoning ? msg.record.reasoning.slice(0, 32000) : null,
           tool_calls: msg.record.tool_calls,
           session_id: msg.record.session_id,
@@ -1354,14 +1502,17 @@ function renderReport(r) {
     }
   }
 
-  if (r.answer) {
+  // Prefer the isolated final answer; fall back to the full text for
+  // reports saved before that field existed.
+  const shown = r.final_answer || r.answer;
+  if (shown) {
     const h = document.createElement('div');
     h.className = 'report-meta';
     h.style.marginTop = '10px';
-    h.textContent = 'Answer given';
+    h.textContent = r.final_answer ? 'Answer given' : 'Full response (pre-split report)';
     const a = document.createElement('div');
     a.className = 'report-q';
-    a.textContent = r.answer;
+    a.textContent = shown;
     detail.append(h, a);
   }
 
