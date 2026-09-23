@@ -261,6 +261,8 @@
   .answer-run.final .ans-num { color: var(--muted); font-family: var(--font-mono); font-size: 12px; }
   .answer-run.final .ans-sp { height: 8px; }
   .answer-run.final strong { font-weight: 600; }
+  .answer-run.final .ts { white-space: nowrap; }
+  .answer-run.final .ts-utc { color: var(--muted); font-size: 12px; }
   .answer-run.final code {
     font-family: var(--font-mono); font-size: 12px; background: var(--bg);
     padding: 1px 4px; border-radius: 3px;
@@ -556,6 +558,49 @@ function renderInline(s) {
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 }
 
+// Only ISO-8601 with an EXPLICIT zone -- a trailing Z, or a +/-HH:MM
+// offset. A bare "2026-09-23T18:38:14" or a date on its own is ambiguous,
+// and guessing its zone is precisely the bug that produced the #7905
+// wrong-window RCA and the answer that relabelled -04:00 times as UTC.
+// Those are left exactly as written. Epoch numbers are left alone too.
+const TIMESTAMP_RE =
+  /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b/g;
+
+function tzAbbrev() {
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+      .formatToParts(new Date());
+    const found = parts.find(p => p.type === 'timeZoneName');
+    return found ? found.value : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+// Renders each timestamp in this browser's zone WITH the zone's own
+// abbreviation, and keeps the UTC time beside it. Nothing is replaced, only
+// added to -- the original string stays in the title attribute, so hovering
+// always shows exactly what Aura wrote.
+function formatTimestamps(escaped) {
+  return escaped.replace(TIMESTAMP_RE, (match) => {
+    const d = new Date(match);
+    if (isNaN(d.getTime())) return match;
+    let local;
+    try {
+      local = new Intl.DateTimeFormat(undefined, {
+        weekday: 'short', day: 'numeric', month: 'short',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false, timeZoneName: 'short',
+      }).format(d);
+    } catch (e) {
+      return match;
+    }
+    const utc = d.toISOString().slice(11, 19) + 'Z';
+    return '<span class="ts" title="' + match + '">' + local +
+      ' <span class="ts-utc">(' + utc + ')</span></span>';
+  });
+}
+
 // Deliberately tiny: headings, bold, inline code, bullets, numbered items.
 // Aura's answers use exactly these, and a real markdown library would be a
 // dependency plus an XSS surface for something this small.
@@ -583,7 +628,10 @@ function renderAnswer(text) {
     if (!raw.trim()) { out.push('<div class="ans-sp"></div>'); continue; }
     out.push('<div class="ans-p">' + renderInline(raw) + '</div>');
   }
-  return out.join('');
+  // Last, so the code/bold passes above see clean text. Our own generated
+  // markup carries no ISO timestamps outside the title attributes this adds,
+  // so there is nothing for it to match twice.
+  return formatTimestamps(out.join(''));
 }
 
 // An assistant message is NOT one blob of text. Aura emits text, calls a
@@ -690,7 +738,13 @@ function addAssistantMessage() {
       answer.el.innerHTML = renderAnswer(answer.text.trim());
       const label = document.createElement('div');
       label.className = 'answer-label';
-      label.textContent = 'Answer';
+      const zone = tzAbbrev();
+      // The per-timestamp abbreviation is authoritative -- this is only a
+      // hint, and it can disagree with an individual timestamp that falls
+      // the other side of a DST change.
+      label.textContent = zone
+        ? 'Answer · times in ' + zone + ', UTC in brackets'
+        : 'Answer';
       answer.el.prepend(label);
       return answer.text.trim();
     },
