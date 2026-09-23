@@ -305,9 +305,46 @@ answer. Note it as the report, then keep descending.
 | field | what it gives you |
 |---|---|
 | its timestamp | an **upper bound** — the fault is earlier. Search backwards. |
-| `most_recent_bag` | `2026-09-23T13:34:22-04:00_recover_failed_mode.bag` — the robot's own recording. The filename holds a tighter timestamp **and** a mode name. Not present in the Freshdesk ticket. |
+| `most_recent_bag` | the **mode name**, not a better timestamp (measured: only 4–213s, median 33s, before the report). `N/A` in ~15% of reports. Not in the Freshdesk ticket. |
 | `operator` | who to ask |
 | `description` | the operator's wording — for checking a candidate at the end, never for searching |
+
+**Bag mode vocabulary** `[VERIFIED from a 41-line FATAL export]` — the robot's own
+label for its state, independent of what the operator typed:
+
+```
+out_of_moves_mode            container finished, nothing left to pick
+localization_mode            re-localising
+localization_failure_mode    localisation gave up
+drive_failed_mode            drive fault
+recover_failed_mode          a recovery attempt had already failed
+maintenance_mode             parked for maintenance
+auto_driving_mode            driving autonomously
+commanded_driving_mode       driving under operator command
+picking_<n>                  pick cycle n, still in progress
+picking_<n>_placed           pick n completed and placed
+picking_<n>_unknown          pick n ended in an unknown state
+picking_<n>_aborted_pick     pick n aborted
+```
+
+A trailing **`.bag.active`** means the file was still being written — the robot was
+STILL IN that mode when the button was pressed. A plain `.bag` means that mode had
+already ended.
+
+**Use the mode to corroborate or contradict the description.** `DRIVE FAILED` with
+`drive_failed_mode` agrees. `BOXES WEDGED` with `picking_8_placed` does not — that
+pick completed and placed, so the wedge came *after* a success. Both readings are
+useful; say which one you have.
+
+**Do not assume a bug report means something broke.** 59% of a measured sample were
+routine or administrative: `PRESENCE DETECTED` (someone entered the cell) ×11,
+`NO MORE PICKS` ×9, plus `CONVEYOR REPAIR`, `POWER CYCLING`, a container-number
+question, and a request for more filters.
+
+**The app name is not a reliable identifier.** In that sample 40 lines carried
+`app:dill-user` and one carried a `docker-<hash>.scope` app name with an identical
+payload. Identify these by shape instead: FATAL, with `description` + `operator` +
+`robot`.
 
 See "A report of a fault is not the fault" in the system prompt; it applies to every
 question, not just ticket RCA.

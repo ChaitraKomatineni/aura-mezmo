@@ -107,16 +107,22 @@ producing logs in the window you care about. Do not mix them.
 
 ## A report of a fault is not the fault — applies to EVERY question
 
-The `dill-user` app is **nothing but operator bug reports**. Every line in
-it is a human at the robot pressing the bug-report button in the UI. There
-is no robot behaviour in that app at all — 1,207 lines over 30 days, all of
-them a person filing a complaint.
+A FATAL line on a production robot is almost always a human pressing the
+bug-report button in the UI. Measured across two fleet days: 41 of 41
+production FATAL lines were operator bug reports, and not one was robot
+behaviour. They usually carry `app:dill-user`, but DO NOT rely on that —
+the same payload also ships under a Docker scope name. The reliable tell is
+the shape: FATAL, with `description`, `operator` and `robot` fields.
 
-It is logged at **FATAL**, which is the trap. FATAL is the top of every
-severity walk, so it is often the first and most severe thing you find, and
-it is phrased like a fault ("wont retract arm"). It is not a fault. It is
-the report of one, written *after* the fact, by a person, in that person's
-own words.
+FATAL being the top of every severity walk is the trap: it is the first and
+most severe thing you find, and it is phrased like a fault ("wont retract
+arm"). It is not a fault. It is a person typing into a box, after the fact.
+
+It is often not even about a fault. 59% of them are routine or
+administrative — `PRESENCE DETECTED` (someone walked into the cell),
+`NO MORE PICKS` (container finished), `CONVEYOR REPAIR`, `POWER CYCLING`,
+"Container number question from austin", "need more filters ordered". Do
+not assume a bug report means something broke.
 
 So, for any question, any workflow, any ticket:
 
@@ -135,12 +141,26 @@ What it IS good for, and you should use it this way:
 - **An upper bound.** The fault happened BEFORE that timestamp. Search
   backwards from it, not around it.
 - **`most_recent_bag`** — e.g.
-  `2026-09-23T13:34:22.801588-04:00_recover_failed_mode.bag`. This is the
-  robot's own recording of what it was doing, and the filename carries both
-  a timestamp and a mode name. Read it: the timestamp is a much tighter
-  anchor than the report time, and a name like `recover_failed_mode` tells
-  you what state the robot had already fallen into. This field exists only
-  in the log line — it is not in the Freshdesk ticket.
+  `2026-09-23T13:34:22.801588-04:00_recover_failed_mode.bag`. The MODE NAME
+  is the valuable part, not the timestamp: measured, the bag is only 4–213
+  seconds (median 33) before the report, so it is no tighter a window. What
+  it gives you is the robot's OWN classification of its state, which is
+  independent of the operator's wording:
+    · `_mode` names — `out_of_moves_mode`, `localization_mode`,
+      `localization_failure_mode`, `drive_failed_mode`,
+      `recover_failed_mode`, `maintenance_mode`, `auto_driving_mode`,
+      `commanded_driving_mode`
+    · `picking_<n>[_placed|_unknown|_aborted_pick]` — a pick cycle and how
+      it ended
+  Corroboration is the point. "DRIVE FAILED" with `drive_failed_mode`
+  agrees; "BOXES WEDGED" with `picking_8_placed` does NOT — that pick had
+  completed and been placed, so the wedge came after a success. Say which
+  of the two you are looking at.
+  A trailing **`.bag.active`** means the file was still being written, so
+  the robot was STILL IN that mode when the button was pressed; a plain
+  `.bag` means the mode had already ended. About 15% of reports have no bag
+  at all (`N/A`) — do not depend on it. This field is not in the Freshdesk
+  ticket; only the log line has it.
 - **`operator`** — who to ask.
 - **Answering questions about the reports themselves.** If someone asks to
   see the bug reports for a robot, a site or a day, this app is exactly the
@@ -370,13 +390,23 @@ So DO NOT search for the words in the ticket. Searching operator language
 finds nothing and you then wrongly report that nothing happened. The
 description's job is to CHECK a candidate at the end, not to find one.
 
-Work top-down through severity, inside the ticket's host and window:
+FATAL is not a rung on this ladder. It is the anchor step. Measured over
+two fleet days, 41 of 41 production FATAL lines were operator bug reports
+— there is no robot-subsystem content at FATAL at all. So:
 
-  1. `level:fatal`, then `level:critical`
-  2. `level:error` (also `level:err`)
-  3. `level:warn` / `level:warning`
-  4. Only if nothing above explains it, widen to INFO or drop the level
-     filter entirely — and say that you had to.
+  STEP 0 — ANCHOR, not evidence. Read the bug report at
+     `level:fatal` for this host and window. Take from it:
+       · its timestamp — the LATEST the problem can have happened
+       · `most_recent_bag` — the mode name is the payload here (see the
+         rule above). Present in about 85% of reports; `N/A` otherwise
+       · `operator` — who to ask
+     Report none of this as a cause. Then move on.
+  STEP 1 — `level:error`, also `level:err`. This is where real evidence
+     starts. CRITICAL and ALERT have been empty every time they were
+     measured; include them if you like, but do not linger.
+  STEP 2 — `level:warn` / `level:warning`.
+  STEP 3 — only if nothing above explains it, widen to INFO or drop the
+     level filter entirely — and say that you had to.
 
 Stop descending as soon as you have a plausible candidate. The top of
 this ladder is small and readable: on a real robot-hour there were 0
