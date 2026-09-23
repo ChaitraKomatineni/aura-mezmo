@@ -138,6 +138,7 @@ The general lesson, if you're debugging this stack: **the error message usually 
 | `Query Too Large` | the window is too wide for the line volume. Narrow the time range or pin a single `host:==gen1-prodN` |
 | A robot search returns other robots' logs | a bare `app:`/`source:` prefix match. Use `==` for an exact match (the proxy does this for `host:` only) |
 | `fleet_*` tools error out | `ROC_DASHBOARD_URL` unreachable — this host needs to be on the Tailnet |
+| `fleet_*` say "connection refused" but `curl` works on the host | you're running this on the *same machine* as the dashboard, and its hostname resolves to `127.0.1.1` — which means the container inside a container. Use the host's Tailscale/LAN IP in `ROC_DASHBOARD_URL`; see `.env.example` |
 | A skill edit doesn't change the agent's behavior | Aura only scans `config/skills/` at startup: `docker compose restart aura` |
 | Sporadic `SSE stream ended` from the heavy analysis tools | upstream transport flakiness; retry. It surfaces as a raised exception, not an error result |
 

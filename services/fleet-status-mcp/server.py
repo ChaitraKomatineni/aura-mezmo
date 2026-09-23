@@ -31,9 +31,12 @@ oracle -- if a host was logging, it was up -- so use the Mezmo histogram
 for a past window.
 """
 
+import ipaddress
 import os
+import socket
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 from fastmcp import FastMCP
@@ -44,6 +47,40 @@ PORT = int(os.environ.get("PORT", "8094"))
 TIMEOUT = float(os.environ.get("ROC_TIMEOUT", "10"))
 
 mcp = FastMCP("fleet-status")
+
+
+def _loopback_hint() -> str:
+    """Explain the one failure that looks like a dead dashboard but isn't.
+
+    If ROC_DASHBOARD_URL's hostname resolves to a loopback address INSIDE
+    this container, the name is almost certainly the host's own hostname.
+    Ubuntu maps that to 127.0.1.1 in /etc/hosts, so `roc-ubu` means "this
+    machine" -- and inside a container, "this machine" is the container,
+    where nothing is listening. It resolves fine and connects to nothing,
+    which reads as a refused connection rather than a DNS error.
+
+    This only happens when the dashboard and this stack share one host. It
+    cost a real debugging session, so the error explains itself instead.
+    """
+    host = urlparse(ROC_URL).hostname or ""
+    try:
+        addr = socket.gethostbyname(host)
+    except OSError:
+        return (f" The hostname '{host}' does not resolve inside this "
+                "container at all, so this is a DNS problem rather than a "
+                "dead dashboard.")
+    if not ipaddress.ip_address(addr).is_loopback:
+        return ""
+    return (
+        f" NOTE: '{host}' resolves to {addr} inside this container, which is "
+        "the CONTAINER's own loopback -- not the dashboard's host. This "
+        "happens when the ROC dashboard runs on the same machine as this "
+        "stack: the hostname means 'me', and 'me' differs inside a "
+        "container. Set ROC_DASHBOARD_URL to that host's routable address "
+        "(its Tailscale or LAN IP, e.g. http://100.x.y.z:3001) rather than "
+        "its hostname. The dashboard must also be listening on 0.0.0.0, not "
+        "only on 127.0.0.1 -- check with `ss -ltnp | grep 3001`."
+    )
 
 
 def _get(path: str) -> dict:
@@ -59,6 +96,7 @@ def _get(path: str) -> dict:
             f"Could not reach the ROC dashboard at {url} ({type(e).__name__}: {e}). "
             "Robot presence is UNKNOWN right now -- do not report robots as "
             "offline on the strength of this failure."
+            + _loopback_hint()
         ) from e
 
 
