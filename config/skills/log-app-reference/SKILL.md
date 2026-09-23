@@ -281,16 +281,27 @@ commands, spec submissions. **Not a primary data source**; it relays what other 
 computed. Note it shows specs being *submitted*, not which are currently *active* — for
 that use `vision`'s `active list of package_specs`.
 
-### `dill-user` — operator bug reports at FATAL
-**`[VERIFIED 23/day]`** — very low volume.
+### `dill-user` — EXCLUDED. It was the operator's bug report, not the fault.
+**You will never see this app.** It is filtered out entirely, and that is deliberate.
 
-```
-ARM IS STUCK OUT OF POSITION     [CONFIRMED]
-PRESENCE DETECTED                [CONFIRMED]
-```
+Every line in it was an operator pressing the bug-report button — `(User Submitted
+Bug Report) site: ..., operator: ..., description: "wont retract arm"`. Measured over
+30 days: 1,207 lines, and **not one** of them was robot behaviour.
 
-Direct human observation tied to an incident. Corroborating evidence, not a technical
-signal. At 23 lines/day, absence here means little.
+It was removed because of *where* it landed rather than its volume. It arrives at
+**FATAL**, so a top-down severity walk hits it first, and it looks like the most
+severe event in the window. But it is written *after* the fault, by a human, in the
+human's words. On ticket #8055 it was the only production FATAL in the whole window,
+and reporting it as the critical event produced a confident wrong answer.
+
+**Never conclude anything from the presence or absence of a bug-report line.** If you
+want to know what the operator reported, read the Freshdesk ticket — that is the
+system of record, and `freshdesk_get_ticket`'s `rca_hints` already gives you
+`reported_at_utc`, the robot, the subsystem and the window.
+
+The general rule this is an instance of: **a report of a fault is not the fault.**
+Whatever timestamp a human-filed report carries, the cause precedes it. Search
+*before* it.
 
 ### Lower volume, less characterised
 `navigation` `[VERIFIED 26,089/day]` · `camera` `[VERIFIED 18,888/day, ERROR 444]` ·
@@ -356,7 +367,9 @@ because the work of a session is not labelled.
 2. `taskloop` — `ESTOP detected with reason`, the documented entry point
 3. `motor_controller` — STO / abort codes, hardware confirmation
 4. `fastloop` — its surviving WARN/ERROR; controller cleanup failures
-5. `dill-user` — whether an operator reported it
+5. For whether an operator reported it: the Freshdesk ticket, not the logs.
+   `dill-user` is filtered out (see above) precisely because its FATAL bug-report
+   line reads as the fault when it is only the report of one.
 
 Remember `GRIPPER_BREAKAWAY` is the most common reason by two orders of magnitude, so
 finding one is not itself remarkable.

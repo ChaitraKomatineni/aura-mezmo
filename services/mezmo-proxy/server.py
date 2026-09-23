@@ -129,7 +129,40 @@ APP_LEVEL_EXCLUSIONS = {
 # investigating it will be invisible here and has to be queried outside
 # this proxy -- config/aura.toml tells the agent to say so rather than
 # report that there were none.
-FULLY_EXCLUDED_APPS = ("pickle_rosbridge",)
+#
+# dill-user is excluded for a completely different reason: not volume, but
+# because it is a FALSE LEAD that reliably produces confident wrong answers.
+#
+# Measured over 30 days: 1,207 lines total, 598 at FATAL and 609 rendering
+# the same payload unleveled. Every single one is an operator pressing the
+# bug-report button -- `(User Submitted Bug Report) site: ..., operator:
+# ..., description: ...`. There is no operational content in the app at all.
+#
+# The danger is its position. It arrives as FATAL, and the Freshdesk RCA
+# method starts by walking severity top-down from FATAL, so the first thing
+# the agent finds in the window is the report ITSELF -- which postdates the
+# fault, describes it in the operator's words, and looks like the most
+# severe event present. Aura duly reported it as the top critical event on
+# ticket #8055.
+#
+# It is also redundant. Checked field by field against ticket #8055: the
+# ticket's rca_hints already carries reported_at_utc (2026-09-23T17:35:02Z,
+# identical to the log line's timestamp), the robot, the subsystem, the
+# resolved window and cf_release_version. Freshdesk is the system of record
+# for operator reports; this app is a copy of it that happens to look like a
+# fatal log event.
+#
+# KNOWN LOSS, accepted: the log line carries `most_recent_bag` (e.g.
+# 2026-09-23T13:34:22-04:00_recover_failed_mode.bag) and `operator`, and
+# NEITHER appears anywhere in the Freshdesk ticket -- a .bag filename search
+# across the whole ticket returns nothing. The bag name is the robot's own
+# label for the state it was in, which is a genuine lead. It is given up
+# because it is a lead rather than a window, its usefulness is unmeasured
+# (n=1), and the ticket already supplies an equally precise report time. If
+# the bag name ever proves to matter, the right fix is to enrich
+# freshdesk-mcp's rca_hints with it, not to un-filter an app that reads as
+# the fault.
+FULLY_EXCLUDED_APPS = ("pickle_rosbridge", "dill-user")
 
 
 # Apps that are operationally irrelevant to robot/arm/safety triage and are

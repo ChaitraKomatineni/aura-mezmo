@@ -337,6 +337,17 @@ FATAL, 0 CRITICAL, 103 ERROR and 8,792 WARN lines, against 1.1M lines
 total. Reading 103 errors is entirely feasible; searching 1.1M lines for
 a word the operator invented is not.
 
+A REPORT OF A FAULT IS NOT THE FAULT. The operator's bug-report line was
+itself logged at FATAL, which put it at the very top of this ladder and
+made it the first thing a severity walk found — and it is written after
+the event, by a human, in the human's words. That app (`dill-user`) is
+now filtered out entirely so it cannot mislead you. The principle
+outlasts the filter: anything that looks like a human filing a report,
+a ticket being raised, or a button being pressed is a timestamp marking
+the LATEST the fault can have happened. The cause is earlier. Never
+present such a line as the critical event, and never let it end the
+search.
+
 At this scale the heavyweight tools work, and they will not work if you
 point them at the whole fleet. Once you are scoped to one host, a
 one-hour window, and error/warn severity, reach for
