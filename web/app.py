@@ -25,6 +25,7 @@ Freshdesk tickets through its own MCP tool servers (see config/aura.toml);
 this app's Freshdesk/logs endpoints are for human browsing in the UI.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -78,6 +79,46 @@ app = FastAPI(title="Aura Mezmo Playground")
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+# The deployment this runs on is a shared machine with a browser left open
+# permanently, so a rebuild does NOT reach the people using it -- an open
+# tab keeps running whatever JavaScript it loaded when it was opened, and
+# nobody thinks to reload. That cost a real debugging session: a UI change
+# was shipped, pulled and rebuilt, and the tab still showed the old
+# behaviour.
+#
+# Two halves to the fix. StaticFiles sends only ETag/Last-Modified with no
+# Cache-Control, which leaves browsers free to serve the HTML from cache
+# without revalidating; the middleware below stops that, so a reload is
+# always honoured. And /api/version lets the page notice it has gone stale
+# and OFFER a reload -- offer, not force, because reloading drops the
+# in-memory chat history and doing that under someone mid-conversation
+# would be worse than the staleness.
+INDEX_HTML = Path("public/index.html")
+
+
+@app.middleware("http")
+async def revalidate_html(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
+@app.get("/api/version")
+def version():
+    """A build id for the served UI: the hash of index.html itself.
+
+    Derived from content rather than a version constant so it cannot drift
+    -- there is no step anyone has to remember to bump.
+    """
+    try:
+        digest = hashlib.sha256(INDEX_HTML.read_bytes()).hexdigest()[:12]
+    except OSError:
+        digest = "unknown"
+    return {"build": digest}
 
 
 @app.get("/api/config")

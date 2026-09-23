@@ -226,6 +226,13 @@
   }
   .restart-banner.show { display: block; }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px 0; }
+  .stale-banner {
+    display: none; align-items: center; gap: 10px; margin-bottom: 16px;
+    padding: 10px 14px; border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); background: var(--panel);
+    font-size: 13px; color: var(--text);
+  }
+  .stale-banner.open { display: flex; }
   /* Narration stays readable but recedes; the answer is the thing you can
      find at a glance when scrolling back through a long turn. */
   .answer-run { white-space: pre-wrap; }
@@ -298,6 +305,12 @@
 </nav>
 
 <main>
+
+  <div id="stale-banner" class="stale-banner">
+    <span>This page is running an older version of the UI.</span>
+    <button class="small-btn" id="stale-reload">Reload</button>
+    <button class="small-btn" id="stale-dismiss">Not now</button>
+  </div>
 
   <!-- CHAT -->
   <section class="panel active" id="panel-chat">
@@ -1556,6 +1569,35 @@ function renderReport(r) {
 
 document.getElementById('reports-refresh').addEventListener('click', loadReports);
 reportsFilter.addEventListener('change', loadReports);
+
+// ---------- Stale-UI detection ----------
+// The IPC runs a browser that is never closed, so a rebuilt container does
+// not reach the person looking at it. Poll the build id and OFFER a reload
+// rather than forcing one -- a reload discards `history`, and yanking that
+// out from under someone mid-answer is worse than a stale tab.
+const staleBanner = document.getElementById('stale-banner');
+let loadedBuild = null;
+
+async function checkBuild() {
+  let build;
+  try {
+    const resp = await fetch('/api/version', { cache: 'no-store' });
+    build = (await resp.json()).build;
+  } catch (e) {
+    return;                  // offline or restarting; try again next tick
+  }
+  if (!build || build === 'unknown') return;
+  if (loadedBuild === null) { loadedBuild = build; return; }
+  if (build !== loadedBuild) staleBanner.classList.add('open');
+}
+
+document.getElementById('stale-reload')
+  .addEventListener('click', () => location.reload());
+document.getElementById('stale-dismiss')
+  .addEventListener('click', () => staleBanner.classList.remove('open'));
+
+checkBuild();
+setInterval(checkBuild, 60000);
 </script>
 </body>
 </html>
