@@ -1288,14 +1288,22 @@ async function correlateTicket(ticketId) {
     'window from its rca_hints — window_start_utc and window_end_utc. Do ' +
     'not use created_at, which is when the ticket was filed rather than ' +
     'when the fault happened.\n\n' +
-    'Then work top-down by severity within that window: FATAL, CRITICAL, ' +
-    'ERROR, WARN. Do not search for the operator\'s wording — it is a ' +
-    'symptom described in their own words, not log text.\n\n' +
-    'Only once you have candidate events, compare them with the ticket ' +
+    'Then work top-down by severity within that window: FATAL is the ' +
+    'anchor step, then ERROR, then WARN. Do not search for the ' +
+    'operator\'s wording — it is a symptom described in their own words, ' +
+    'not log text.\n\n' +
+    'Collect every distinct error in a level before moving on, then RANK ' +
+    'them — do not drop any. Template-dedup the window and the whole ' +
+    'surrounding 24 hours, and compare the two counts to tell background ' +
+    'noise from something new today. Rank on that first, then on ' +
+    'closeness to the anchor working backwards, then on whether the app ' +
+    'owns the subsystem named in rca_hints. Give a one-line reason for ' +
+    'each item\'s position.\n\n' +
+    'Only once you have ranked them, compare them with the ticket ' +
     'text and say plainly whether they explain the reported symptom, or ' +
     'whether nothing in that window does. Quote the exact log lines with ' +
-    'timestamps, state the absolute UTC window you searched, and cite the ' +
-    'ticket number.';
+    'timestamps and their timezone, state the absolute UTC window you ' +
+    'searched, and cite the ticket number.';
 
   sendChat(prompt);
 }

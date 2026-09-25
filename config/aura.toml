@@ -408,11 +408,16 @@ two fleet days, 41 of 41 production FATAL lines were operator bug reports
   STEP 3 — only if nothing above explains it, widen to INFO or drop the
      level filter entirely — and say that you had to.
 
-Stop descending as soon as you have a plausible candidate. The top of
-this ladder is small and readable: on a real robot-hour there were 0
-FATAL, 0 CRITICAL, 103 ERROR and 8,792 WARN lines, against 1.1M lines
-total. Reading 103 errors is entirely feasible; searching 1.1M lines for
-a word the operator invented is not.
+Finish the level you are on before you descend. Collect EVERY distinct
+error in it, then rank them (below). Do not stop at the first plausible
+one — the first thing a tool returns is in tool order, not relevance
+order, and it is routinely a background fault that happens all day.
+Descend a level only when the level above explains nothing.
+
+The top of this ladder is small and readable: on a real robot-hour there
+were 0 FATAL, 0 CRITICAL, 103 ERROR and 8,792 WARN lines, against 1.1M
+lines total. Reading 103 errors is entirely feasible; searching 1.1M
+lines for a word the operator invented is not.
 
 Expect the operator's own bug report to be sitting at the top of this
 ladder at FATAL. It is not a finding — see "A report of a fault is not
@@ -425,7 +430,58 @@ one-hour window, and error/warn severity, reach for
 `mezmo_deduplicate_logs_time_range` — all three of the expensive tools
 succeed at this size.
 
-Only after you have candidates, compare them with the ticket text and
+## Rank the candidates before you present them
+
+A one-hour window on a working robot contains errors that have nothing to
+do with the ticket. Presenting them in the order a tool returned them
+makes the least relevant finding look like the headline — a camera
+initialisation failure has been reported first on a ticket about false
+presence detection, which is a safety issue the camera has no part in.
+
+RANK, DO NOT DROP. Every distinct error you found gets presented. The
+order changes, and you say WHY each one sits where it does. A finding you
+rank last is still a finding, and the reader may know something you do
+not.
+
+Rank on these, strongest signal first:
+
+1. **Is it background?** The decisive test, and the one that catches the
+   camera case. Run `mezmo_deduplicate_logs_time_range` with
+   `dedup_mode: "template"` TWICE for the same host at the same severity:
+   once over the failure window, once over the whole 24 hours containing
+   it. ONE extra call, and it gives you a per-template count for the day
+   beside the count in the window. Then, per template:
+     · day count roughly proportional to the window's share of the day
+       ->  BACKGROUND. It was happening before the fault and kept
+       happening after. Rank it low and label it "background, N/day".
+     · day count barely higher than the window count  ->  NOTABLE. It
+       essentially only happens here. Rank it high and say it is new.
+   If one template needs a closer look, THEN spend a
+   `mezmo_get_log_histogram` at `1h` on that template alone to see
+   whether the day's occurrences are spread evenly or arrive as a burst,
+   and give the time the burst started. Do not run that per template —
+   one comparison call first, then at most one or two follow-ups.
+2. **How close is it to the anchor, working backwards?** The fault
+   precedes the report, usually by a short time — measured, the robot's
+   own bag timestamp sits 4 to 213 seconds before the button press. An
+   error two minutes before the report outranks one twenty-five minutes
+   before. Anything AFTER the report timestamp is a consequence or
+   unrelated; say which you think it is.
+3. **Does the app own the subsystem on the ticket?** `rca_hints.subsystem`
+   is a dropdown the operator picked, so it is trustworthy in a way their
+   prose is not. Load the `log-app-reference` skill and use its per-app
+   sections to see which app owns that subsystem. An error from the
+   owning app outranks an equally novel error from an unrelated one.
+4. **First occurrence, not the loudest.** An error repeating 30 times is
+   one event and 29 echoes. Rank by the FIRST occurrence and report the
+   count alongside it. A high count is not evidence of importance.
+
+Present the ranked list with a one-line reason per item, for example:
+  1. <error>  — new today, first seen 90s before the report, safety_interface
+  2. <error>  — new today, but 22 min before the report and unrelated app
+  3. <error>  — background, ~400/day, unchanged through the window
+
+Only after you have ranked them, compare them with the ticket text and
 state plainly which of these is true:
   - this error explains the reported symptom, and here is why;
   - this error is real but does NOT obviously explain the symptom;
