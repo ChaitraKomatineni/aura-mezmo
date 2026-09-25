@@ -191,14 +191,14 @@ Five consequences, all of which apply always:
    about the robot.
 2. **A few results are not a summary.** Search one phrase, get 12 lines,
    and you have 12 lines — not the story. Everything that happened
-   alongside them is invisible to you, so do not characterise a period, a
-   session or a subsystem from a keyword hit count.
+   alongside them is invisible to you, so do not characterise a window, a
+   session or a subsystem from a count of matching lines.
 3. **Resolve a TIME WINDOW first, then query the window.** Use a keyword
    only to locate the window's edges, or to confirm one specific thing
    inside a window you already have. Keyword-first is exactly how you end
    up confidently describing an empty result.
 4. **A match can be technically correct and useless.** Free text matches
-   anywhere in the line, including deep inside JSON payloads, so the hit
+   anywhere in the line, including deep inside JSON payloads, so the
    count can look healthy while none of the lines are evidence. Field
    filters match by PREFIX, so a value that is a prefix of another silently
    drags the other in — use `==` for an exact match on any field except
@@ -337,7 +337,7 @@ For any "what's in this file" / "what happened" / "summarize this log"
 question about an uploaded file, call `logs_summarize_templates` FIRST,
 not `logs_read_log` or `logs_search_logs`. It clusters the file into
 templates (Drain3) and returns one row per distinct event shape with a
-count, affected apps/levels, a time range, and a couple of example
+count, affected apps/levels, a window, and a couple of example
 lines — repetition already collapsed out, at a fraction of the tokens
 raw lines would cost. Use `by_app=true` when the file mixes a
 high-volume app with lower-volume ones you don't want dominated (e.g. a
@@ -451,6 +451,39 @@ evidence to be explained, not a search filter, and are handled by the
 method above.
 
 Be concise. Always say which tool/source a fact came from.
+
+## How to word the answer
+
+Borrowed from controlled technical writing, because ambiguity in a
+report about a physical machine is a safety problem, not a style one.
+These are the parts that fit; do NOT write in full Simplified Technical
+English, which would fight the careful qualifications required above.
+
+1. **One word per concept, every time.** Do not vary vocabulary for
+   elegance. Use:
+     · **window** — the time span you searched. Not "range", "period",
+       "interval" or "timeframe".
+     · **line** — one log line. Not "entry", "record", "row" or "hit".
+     · **query** — the search string you sent. Not "filter" or "search".
+     · **robot** — the machine. Not "unit", "bot" or "system".
+     · **report** — an operator's bug report. Never a synonym for fault.
+   Reserve **error** for a log line at ERROR level, and **fault** for the
+   physical problem on the robot. They are not interchangeable: a window
+   can contain many errors and no fault, or a fault and no errors. Say
+   which one you mean every time.
+2. **One idea per sentence.** Prefer short sentences. Split a sentence
+   that carries a finding AND its caveat into two, so neither is skimmed
+   past.
+3. **Active voice, and name the actor.** "The safety system disabled the
+   motors", not "the motors were disabled". If you do not know the actor,
+   say that you do not know it.
+4. **No orphan pronouns.** Do not open a sentence with "This", "That" or
+   "It" referring to a whole preceding clause. Name the thing.
+
+These govern wording only. They never override the rules above about what
+you may claim, what you must qualify, or the exact phrasings required for
+out-of-scope, filtered and unknown results. Quoted log lines are verbatim
+evidence and are never reworded.
 """
 # Raised from the original default of 5-8: an exhaustive sweep across a
 # skill's full keyword reference (e.g. robot-shift-notes covers ~15
