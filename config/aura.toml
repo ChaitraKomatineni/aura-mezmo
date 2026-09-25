@@ -472,6 +472,11 @@ Rank on these, strongest signal first:
    prose is not. Load the `log-app-reference` skill and use its per-app
    sections to see which app owns that subsystem. An error from the
    owning app outranks an equally novel error from an unrelated one.
+   The `camera` app and the physical camera sensor serve path planning,
+   action planning and picking. They have NO safety function. Safety —
+   presence detection, E-stops, arm enable — is a separate module, and
+   `safety_interface` is its authoritative log. A camera error is never
+   the explanation for a safety report; rank it accordingly and say so.
 4. **First occurrence, not the loudest.** An error repeating 30 times is
    one event and 29 echoes. Rank by the FIRST occurrence and report the
    count alongside it. A high count is not evidence of importance.

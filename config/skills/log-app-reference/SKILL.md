@@ -189,6 +189,19 @@ were observed vs estimated, and how well a face's plane fit the point cloud.
 Its **415,224 WARN lines/day** are worth treating as a standing condition to explain,
 not background.
 
+### `camera` — picking pipeline only, never safety
+**`[VERIFIED 18,888/day, ERROR 444]`**
+
+The camera app and the camera sensor on the robot feed **path planning, action
+planning and picking**. They have **no safety function whatsoever**.
+
+Safety is a completely separate module. Presence detection, E-stops and arm-enable
+belong to `safety_interface` — see that section above.
+
+A camera error can explain a failed pick, a mis-placed box, or a stalled pick cycle.
+It **cannot** explain false presence detection, an unexpected E-stop, or an arm that
+will not enable. Never offer one as the cause of a safety report.
+
 ### `scan_perception` — highest error volume in the fleet
 **`[VERIFIED 366,045/day]`** — WARN 295,716, **ERROR 68,968**, INFO 634.
 
@@ -350,7 +363,7 @@ See "A report of a fault is not the fault" in the system prompt; it applies to e
 question, not just ticket RCA.
 
 ### Lower volume, less characterised
-`navigation` `[VERIFIED 26,089/day]` · `camera` `[VERIFIED 18,888/day, ERROR 444]` ·
+`navigation` `[VERIFIED 26,089/day]` · `camera` see above ·
 `safety_interface` see above · `monitor` `[VERIFIED 7,978/day]` ·
 `workspace` `[VERIFIED 7,794/day]` · `pendant` `[VERIFIED 7,194/day, ERROR 1,840]` ·
 `containerd.service` / `docker.service` / `logdna-agent.service` / `init.scope` —
