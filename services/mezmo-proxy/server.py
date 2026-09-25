@@ -46,6 +46,8 @@ from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool, ToolResult
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 MEZMO_URL = os.environ.get("MEZMO_MCP_URL", "https://mcp.mezmo.com/mcp")
 API_KEY = os.environ.get("MEZMO_API_KEY", "")
@@ -876,6 +878,17 @@ def main() -> int:
               flush=True)
     mcp.run(transport="streamable-http", host="0.0.0.0", port=PORT)
     return 0
+
+
+# Liveness for the Docker healthcheck. Deliberately NOT an MCP call: a
+# POST to /mcp with `initialize` mints a session, FastMCP keeps every one
+# of them, and at a 10s interval that is 8,640 sessions a day against a
+# 10,000 ceiling -- so the healthcheck itself took the server down after
+# about 28 hours with "Refusing to open a new session". A plain GET
+# creates no session.
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 if __name__ == "__main__":

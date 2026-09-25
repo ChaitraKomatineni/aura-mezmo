@@ -76,14 +76,11 @@ services:
     volumes:
       - logs-data:/data/uploads
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - >-
-          curl -sf http://localhost:8091/mcp -X POST
-          -H "Content-Type: application/json"
-          -H "Accept: application/json, text/event-stream"
-          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
-          > /dev/null || exit 1
+      # A plain GET -- NOT an MCP initialize. See the /health
+      # route in server.py: an initialize mints a session that is
+      # never closed, and at this interval that exhausted
+      # FastMCP's 10,000-session ceiling in about 28 hours.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8091/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -120,14 +117,11 @@ services:
       # are both reachable. The proxy itself never reads this.
       - ./reports:/reports:ro
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - >-
-          curl -sf http://localhost:8093/mcp -X POST
-          -H "Content-Type: application/json"
-          -H "Accept: application/json, text/event-stream"
-          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
-          > /dev/null || exit 1
+      # A plain GET -- NOT an MCP initialize. See the /health
+      # route in server.py: an initialize mints a session that is
+      # never closed, and at this interval that exhausted
+      # FastMCP's 10,000-session ceiling in about 28 hours.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8093/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -149,14 +143,11 @@ services:
     environment:
       ROC_DASHBOARD_URL: "${ROC_DASHBOARD_URL:-http://roc-ubu:3001}"
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - >-
-          curl -sf http://localhost:8094/mcp -X POST
-          -H "Content-Type: application/json"
-          -H "Accept: application/json, text/event-stream"
-          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
-          > /dev/null || exit 1
+      # A plain GET -- NOT an MCP initialize. See the /health
+      # route in server.py: an initialize mints a session that is
+      # never closed, and at this interval that exhausted
+      # FastMCP's 10,000-session ceiling in about 28 hours.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8094/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -178,14 +169,11 @@ services:
       # credential. Only mezmo-proxy should hold it.
       MEZMO_API_KEY: ""
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - >-
-          curl -sf http://localhost:8092/mcp -X POST
-          -H "Content-Type: application/json"
-          -H "Accept: application/json, text/event-stream"
-          -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0"}},"id":1}'
-          > /dev/null || exit 1
+      # A plain GET -- NOT an MCP initialize. See the /health
+      # route in server.py: an initialize mints a session that is
+      # never closed, and at this interval that exhausted
+      # FastMCP's 10,000-session ceiling in about 28 hours.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8092/health"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from template_mining import build_output_rows, mine_file, read_occurrences
 
@@ -244,6 +246,17 @@ def lookup_template(
         "returned": len(occurrences),
         "occurrences": occurrences,
     }
+
+
+# Liveness for the Docker healthcheck. Deliberately NOT an MCP call: a
+# POST to /mcp with `initialize` mints a session, FastMCP keeps every one
+# of them, and at a 10s interval that is 8,640 sessions a day against a
+# 10,000 ceiling -- so the healthcheck itself took the server down after
+# about 28 hours with "Refusing to open a new session". A plain GET
+# creates no session.
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 if __name__ == "__main__":

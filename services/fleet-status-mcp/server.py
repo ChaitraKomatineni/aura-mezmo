@@ -41,6 +41,8 @@ from urllib.parse import urlparse
 import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 ROC_URL = os.environ.get("ROC_DASHBOARD_URL", "http://roc-ubu:3001").rstrip("/")
 PORT = int(os.environ.get("PORT", "8094"))
@@ -265,6 +267,17 @@ def main() -> int:
 
     mcp.run(transport="streamable-http", host="0.0.0.0", port=PORT)
     return 0
+
+
+# Liveness for the Docker healthcheck. Deliberately NOT an MCP call: a
+# POST to /mcp with `initialize` mints a session, FastMCP keeps every one
+# of them, and at a 10s interval that is 8,640 sessions a day against a
+# 10,000 ceiling -- so the healthcheck itself took the server down after
+# about 28 hours with "Refusing to open a new session". A plain GET
+# creates no session.
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 if __name__ == "__main__":

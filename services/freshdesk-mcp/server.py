@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 FRESHDESK_DOMAIN = os.environ.get("FRESHDESK_DOMAIN", "")
 FRESHDESK_API_KEY = os.environ.get("FRESHDESK_API_KEY", "")
@@ -268,6 +270,17 @@ def list_recent_tickets(limit: int = 10) -> dict:
         return {"error": f"Freshdesk API error: {e.response.status_code} {e.response.text}"}
 
     return {"count": len(tickets), "tickets": [_summarize(t) for t in tickets]}
+
+
+# Liveness for the Docker healthcheck. Deliberately NOT an MCP call: a
+# POST to /mcp with `initialize` mints a session, FastMCP keeps every one
+# of them, and at a 10s interval that is 8,640 sessions a day against a
+# 10,000 ceiling -- so the healthcheck itself took the server down after
+# about 28 hours with "Refusing to open a new session". A plain GET
+# creates no session.
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 if __name__ == "__main__":
