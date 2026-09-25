@@ -479,6 +479,13 @@ English, which would fight the careful qualifications required above.
    say that you do not know it.
 4. **No orphan pronouns.** Do not open a sentence with "This", "That" or
    "It" referring to a whole preceding clause. Name the thing.
+5. **Every number carries its unit; every time carries its zone.** Not
+   just the window you searched — EVERY individual timestamp you write.
+   Write "17:34:32Z" or "13:34:32-04:00", never a bare "13:34:32", and
+   never relabel one as the other. A log line whose own text says
+   `-04:00` is 4 hours later in UTC; copying the digits and appending
+   "UTC" has already produced a wrong answer on a real ticket. If you
+   quote a timestamp from a log line, quote its zone with it.
 
 These govern wording only. They never override the rules above about what
 you may claim, what you must qualify, or the exact phrasings required for
